@@ -8,16 +8,6 @@
 #import <Cordova/CDV.h>
 #import <UIKit/UIKit.h>
 
-@interface EmbeddedWebView () <WKNavigationDelegate, WKUIDelegate>
-
-@property (nonatomic, strong) WKWebView *embeddedWebView;
-@property (nonatomic, strong) UIView *webViewContainer;
-@property (nonatomic, strong) UIProgressView *progressBar;
-@property (nonatomic, assign) BOOL canGoBack;
-@property (nonatomic, assign) BOOL canGoForward;
-
-@end
-
 @implementation EmbeddedWebView
 
 - (void)pluginInitialize {
@@ -78,7 +68,17 @@
                 // Configure WKWebView
                 WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
                 config.allowsInlineMediaPlayback = YES;
-                config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
+                
+                // Guarded use of mediaTypesRequiringUserActionForPlayback (iOS 10+)
+                if (@available(iOS 10.0, *)) {
+                    config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
+                } else {
+                    // Fallback for older iOS versions
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                    config.requiresUserActionForMediaPlayback = NO;
+#pragma clang diagnostic pop
+                }
                 
                 // IMPORTANT: allow JS to open windows so delegate methods get called
                 config.preferences.javaScriptCanOpenWindowsAutomatically = YES;
@@ -413,7 +413,7 @@
         
         // Inject smooth scrolling CSS
         NSString *css = @"html, body { scroll-behavior: smooth !important; -webkit-overflow-scrolling: touch; }";
-        NSString *js = [NSString stringWithFormat:@"var style = document.createElement('style'); style.innerHTML = `%@`; document.head.appendChild(style);", css];
+        NSString *js = [NSString stringWithFormat:@"var style = document.createElement('style'); style.innerHTML = '%@'; document.head.appendChild(style);", css];
         [webView evaluateJavaScript:js completionHandler:nil];
         
         // Fallback: rewrite target="_blank" anchors and override window.open + delegated click capture (SPA)
