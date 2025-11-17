@@ -1,5 +1,6 @@
 #import <Cordova/CDVPlugin.h>
 #import <WebKit/WebKit.h>
+#import <UIKit/UIKit.h>
 
 @interface EmbeddedWebView : CDVPlugin <WKNavigationDelegate, WKUIDelegate>
 

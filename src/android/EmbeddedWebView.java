@@ -13,6 +13,8 @@ import android.webkit.WebViewClient;
 import android.webkit.WebSettings;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
+import android.os.Message;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
@@ -164,6 +166,9 @@ public class EmbeddedWebView extends CordovaPlugin {
                 settings.setAllowContentAccess(true);
                 settings.setLoadWithOverviewMode(true);
                 settings.setUseWideViewPort(true);
+                // allow window.open and multiple windows so onCreateWindow can be called
+                settings.setJavaScriptCanOpenWindowsAutomatically(true);
+                settings.setSupportMultipleWindows(true);
 
                 if (options.optBoolean("enableZoom", false)) {
                     settings.setBuiltInZoomControls(true);
@@ -249,6 +254,21 @@ public class EmbeddedWebView extends CordovaPlugin {
                                 + "document.head.appendChild(style);";
                         view.evaluateJavascript(js, null);
 
+                        // Fallback JS: rewrite target="_blank" and override window.open to use same window
+                        String rewriteTargets =
+                            "(() => { " +
+                            "try { " +
+                            "document.querySelectorAll('a[target=\"_blank\"]').forEach(a => a.target = '_self');" +
+                            "window.open = function(url) { window.location.href = url; };" +
+                            // click-capture for delegated anchors (SPA)
+                            "document.addEventListener('click', function(e){ " +
+                            " var node = e.target; while(node && node.tagName !== 'A') node = node.parentElement; " +
+                            " if (node && node.tagName === 'A') { var href = node.getAttribute('href'); var target = node.getAttribute('target'); if (href && target === '_blank') { e.preventDefault(); window.location.href = href; } } " +
+                            "}, true);" +
+                            "} catch(e) { console.warn('rewriteTargets failed', e); }" +
+                            "})();";
+                        view.evaluateJavascript(rewriteTargets, null);
+
                         Log.d(TAG, "Page finished loading: " + url);
 
                         updateNavigationState();
@@ -264,6 +284,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
                 });
 
+                // WebChromeClient with onCreateWindow to capture target=_blank / window.open popups
                 embeddedWebView.setWebChromeClient(new WebChromeClient() {
                     @Override
                     public void onProgressChanged(WebView view, int newProgress) {
@@ -272,6 +293,48 @@ public class EmbeddedWebView extends CordovaPlugin {
                             progressBar.setProgress(newProgress);
                             Log.d(TAG, "Loading progress: " + newProgress + "%");
                         }
+                    }
+
+                    @Override
+                    public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, Message resultMsg) {
+                        // temp WebView to capture the popup's request
+                        WebView popupWebView = new WebView(view.getContext());
+                        WebSettings popupSettings = popupWebView.getSettings();
+                        popupSettings.setJavaScriptEnabled(true);
+                        popupSettings.setDomStorageEnabled(true);
+                        popupSettings.setJavaScriptCanOpenWindowsAutomatically(true);
+
+                        popupWebView.setWebViewClient(new WebViewClient() {
+                            @Override
+                            public boolean shouldOverrideUrlLoading(WebView wv, String url) {
+                                // forward URL to main embeddedWebView
+                                cordova.getActivity().runOnUiThread(() -> {
+                                    if (embeddedWebView != null) {
+                                        embeddedWebView.loadUrl(url);
+                                    }
+                                });
+                                // cleanup
+                                try { wv.stopLoading(); wv.destroy(); } catch (Exception ignored) {}
+                                return true;
+                            }
+
+                            @Override
+                            public boolean shouldOverrideUrlLoading(WebView wv, WebResourceRequest request) {
+                                final String reqUrl = request.getUrl().toString();
+                                cordova.getActivity().runOnUiThread(() -> {
+                                    if (embeddedWebView != null) {
+                                        embeddedWebView.loadUrl(reqUrl);
+                                    }
+                                });
+                                try { wv.stopLoading(); wv.destroy(); } catch (Exception ignored) {}
+                                return true;
+                            }
+                        });
+
+                        WebView.WebViewTransport transport = (WebView.WebViewTransport) resultMsg.obj;
+                        transport.setWebView(popupWebView);
+                        resultMsg.sendToTarget();
+                        return true;
                     }
                 });
 
