@@ -4,14 +4,12 @@
 
 @interface EmbeddedWebView : CDVPlugin <WKNavigationDelegate, WKUIDelegate>
 
-@property (nonatomic, strong) WKWebView *embeddedWebView;
-@property (nonatomic, strong) UIProgressView *progressBar;
-@property (nonatomic, strong) UIView *webViewContainer;
-@property (nonatomic, assign) BOOL canGoBack;
-@property (nonatomic, assign) BOOL canGoForward;
+// Map of instanceId -> instance holder (managed in .m)
+@property (nonatomic, strong) NSMutableDictionary<NSString *, id> *instances;
+@property (nonatomic, strong) NSString *lastCreatedId;
 @property (nonatomic, strong) NSString *currentCallbackId;
 
-// Public methods
+// Public methods (now expect id as first argument from JS)
 - (void)create:(CDVInvokedUrlCommand*)command;
 - (void)destroy:(CDVInvokedUrlCommand*)command;
 - (void)loadUrl:(CDVInvokedUrlCommand*)command;

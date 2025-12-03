@@ -1,6 +1,6 @@
 //
 //  EmbeddedWebView.m
-//  Cordova Plugin - EmbeddedWebView
+//  Cordova Plugin - EmbeddedWebView (multi-instance)
 //
 
 #import "EmbeddedWebView.h"
@@ -8,45 +8,102 @@
 #import <Cordova/CDV.h>
 #import <UIKit/UIKit.h>
 
+#pragma mark - Instance holder
+
+@interface EmbeddedWebViewInstance : NSObject
+@property (nonatomic, strong) WKWebView *webView;
+@property (nonatomic, strong) UIProgressView *progressBar;
+@property (nonatomic, strong) UIView *container;
+@property (nonatomic, assign) BOOL canGoBack;
+@property (nonatomic, assign) BOOL canGoForward;
+@end
+
+@implementation EmbeddedWebViewInstance
+@end
+
+#pragma mark - Plugin
+
 @implementation EmbeddedWebView
 
 - (void)pluginInitialize {
     [super pluginInitialize];
-    self.canGoBack = NO;
-    self.canGoForward = NO;
-    NSLog(@"[EmbeddedWebView] Plugin initialized");
+    self.instances = [NSMutableDictionary dictionary];
+    self.lastCreatedId = nil;
+    NSLog(@"[EmbeddedWebView] Plugin initialized (multi-instance)");
 }
 
+#pragma mark - Helper: instance lookup
+
+- (EmbeddedWebViewInstance *)instanceForId:(NSString *)instanceId
+                                   command:(CDVInvokedUrlCommand *)command {
+    EmbeddedWebViewInstance *instance = self.instances[instanceId];
+    if (!instance || !instance.webView) {
+        if (command) {
+            NSString *msg = [NSString stringWithFormat:@"WebView instance not found for id: %@", instanceId];
+            CDVPluginResult *res = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+                                                     messageAsString:msg];
+            [self.commandDelegate sendPluginResult:res callbackId:command.callbackId];
+        }
+        return nil;
+    }
+    return instance;
+}
+
+- (NSString *)instanceIdForWebView:(WKWebView *)webView {
+    for (NSString *key in self.instances) {
+        EmbeddedWebViewInstance *inst = self.instances[key];
+        if (inst.webView == webView) {
+            return key;
+        }
+    }
+    return nil;
+}
+
+#pragma mark - Create
+
+// JS: EmbeddedWebView.create(id, url, options, ...)
+// command.arguments[0] = id
+// command.arguments[1] = url
+// command.arguments[2] = options
 - (void)create:(CDVInvokedUrlCommand*)command {
-    NSLog(@"[EmbeddedWebView] Creating WebView");
-    
-    NSString *url = [command argumentAtIndex:0];
-    NSDictionary *options = [command argumentAtIndex:1 withDefault:@{}];
-    
+    NSLog(@"[EmbeddedWebView] Creating WebView (multi-instance)");
+
+    NSString *instanceId = [command argumentAtIndex:0];
+    NSString *url = [command argumentAtIndex:1];
+    NSDictionary *options = [command argumentAtIndex:2 withDefault:@{}];
+
+    if (!instanceId || instanceId.length == 0) {
+        CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+                                                    messageAsString:@"id must be a non-empty string"];
+        [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
+        return;
+    }
+
     if (!url || url.length == 0) {
         CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
                                                     messageAsString:@"URL must be a non-empty string"];
         [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
         return;
     }
-    
+
+    // If instance already exists for this id, destroy it first
+    if (self.instances[instanceId]) {
+        NSLog(@"[EmbeddedWebView] WebView for id=%@ already exists, destroying before creating new one", instanceId);
+        [self destroyInstanceWithId:instanceId sendCallback:NO callbackId:nil];
+    }
+
     [self.commandDelegate runInBackground:^{
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
-                if (self.embeddedWebView != nil) {
-                    NSLog(@"[EmbeddedWebView] WebView already exists, destroying before creating new one");
-                    [self destroyWebView];
-                }
-                
                 NSNumber *topOffset = options[@"top"] ?: @0;
                 NSNumber *bottomOffset = options[@"bottom"] ?: @0;
-                
-                NSLog(@"[EmbeddedWebView] WebView config - URL: %@", url);
+
+                NSLog(@"[EmbeddedWebView] WebView config (id=%@) - URL: %@", instanceId, url);
                 NSLog(@"[EmbeddedWebView] User offsets - Top: %@px, Bottom: %@px", topOffset, bottomOffset);
-                
+
                 CGFloat safeTop = 0;
                 CGFloat safeBottom = 0;
-                
+
                 if (@available(iOS 11.0, *)) {
                     UIWindow *window = UIApplication.sharedApplication.keyWindow;
                     if (window) {
@@ -54,36 +111,37 @@
                         safeBottom = window.safeAreaInsets.bottom;
                     }
                 }
-                
+
                 NSLog(@"[EmbeddedWebView] Safe area insets - Top: %.0fpx, Bottom: %.0fpx", safeTop, safeBottom);
-                
+
                 CGFloat finalTopMargin = safeTop + [topOffset floatValue];
                 CGFloat finalBottomMargin = safeBottom + [bottomOffset floatValue];
-                
+
                 NSLog(@"[EmbeddedWebView] Final margins - Top: %.0fpx, Bottom: %.0fpx", finalTopMargin, finalBottomMargin);
-                
-                self.webViewContainer = [[UIView alloc] init];
-                self.webViewContainer.backgroundColor = [UIColor clearColor];
-                
+
+                EmbeddedWebViewInstance *instance = [[EmbeddedWebViewInstance alloc] init];
+                instance.canGoBack = NO;
+                instance.canGoForward = NO;
+
+                instance.container = [[UIView alloc] init];
+                instance.container.backgroundColor = [UIColor clearColor];
+
                 // Configure WKWebView
                 WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
                 config.allowsInlineMediaPlayback = YES;
-                
-                // Guarded use of mediaTypesRequiringUserActionForPlayback (iOS 10+)
+
                 if (@available(iOS 10.0, *)) {
                     config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
                 } else {
-                    // Fallback for older iOS versions
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
                     config.requiresUserActionForMediaPlayback = NO;
 #pragma clang diagnostic pop
                 }
-                
-                // IMPORTANT: allow JS to open windows so delegate methods get called
+
                 config.preferences.javaScriptCanOpenWindowsAutomatically = YES;
                 config.preferences.javaScriptEnabled = YES;
-                
+
                 if ([options[@"enableZoom"] boolValue]) {
                     NSString *viewport = @"var meta = document.createElement('meta'); meta.name = 'viewport'; meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes'; document.getElementsByTagName('head')[0].appendChild(meta);";
                     WKUserScript *script = [[WKUserScript alloc] initWithSource:viewport
@@ -91,20 +149,21 @@
                                                                forMainFrameOnly:YES];
                     [config.userContentController addUserScript:script];
                 }
-                
-                self.embeddedWebView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:config];
-                self.embeddedWebView.navigationDelegate = self;
-                self.embeddedWebView.UIDelegate = self;
-                self.embeddedWebView.scrollView.bounces = YES;
-                self.embeddedWebView.scrollView.showsVerticalScrollIndicator = NO;
-                self.embeddedWebView.scrollView.showsHorizontalScrollIndicator = NO;
-                self.embeddedWebView.backgroundColor = [UIColor clearColor];
-                self.embeddedWebView.opaque = NO;
-                
+
+                WKWebView *webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:config];
+                instance.webView = webView;
+                webView.navigationDelegate = self;
+                webView.UIDelegate = self;
+                webView.scrollView.bounces = YES;
+                webView.scrollView.showsVerticalScrollIndicator = NO;
+                webView.scrollView.showsHorizontalScrollIndicator = NO;
+                webView.backgroundColor = [UIColor clearColor];
+                webView.opaque = NO;
+
                 if (options[@"userAgent"]) {
-                    self.embeddedWebView.customUserAgent = options[@"userAgent"];
+                    webView.customUserAgent = options[@"userAgent"];
                 }
-                
+
                 if ([options[@"clearCache"] boolValue]) {
                     NSSet *websiteDataTypes = [NSSet setWithArray:@[
                         WKWebsiteDataTypeDiskCache,
@@ -115,77 +174,81 @@
                                                                modifiedSince:dateFrom
                                                            completionHandler:^{}];
                 }
-                
-                [self.embeddedWebView addObserver:self
-                                       forKeyPath:@"estimatedProgress"
-                                          options:NSKeyValueObservingOptionNew
-                                          context:nil];
-                
-                // Create progress bar
-                self.progressBar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
-                
+
+                [webView addObserver:self
+                           forKeyPath:@"estimatedProgress"
+                              options:NSKeyValueObservingOptionNew
+                              context:nil];
+
+                // Progress bar
+                UIProgressView *progressBar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+                instance.progressBar = progressBar;
+
                 NSString *progressColor = options[@"progressColor"] ?: @"#2196F3";
-                self.progressBar.progressTintColor = [self colorFromHexString:progressColor];
-                
+                progressBar.progressTintColor = [self colorFromHexString:progressColor];
+
                 NSNumber *progressHeight = options[@"progressHeight"] ?: @5;
                 CGFloat progressHeightValue = [progressHeight floatValue];
-                
-                self.progressBar.hidden = YES;
-                
-                [self.webViewContainer addSubview:self.embeddedWebView];
-                [self.webViewContainer addSubview:self.progressBar];
-                
+
+                progressBar.hidden = YES;
+
+                [instance.container addSubview:webView];
+                [instance.container addSubview:progressBar];
+
                 UIView *mainView = self.webView.superview ?: [UIApplication sharedApplication].keyWindow;
                 if (!mainView) {
-                    mainView = self.webView; // fallback
+                    mainView = self.webView;
                 }
-                [mainView addSubview:self.webViewContainer];
-                
-                // Setup constraints
-                self.webViewContainer.translatesAutoresizingMaskIntoConstraints = NO;
-                self.embeddedWebView.translatesAutoresizingMaskIntoConstraints = NO;
-                self.progressBar.translatesAutoresizingMaskIntoConstraints = NO;
-                
+                [mainView addSubview:instance.container];
+
+                // Auto Layout
+                instance.container.translatesAutoresizingMaskIntoConstraints = NO;
+                webView.translatesAutoresizingMaskIntoConstraints = NO;
+                progressBar.translatesAutoresizingMaskIntoConstraints = NO;
+
                 [NSLayoutConstraint activateConstraints:@[
-                    // Container constraints
-                    [self.webViewContainer.leadingAnchor constraintEqualToAnchor:mainView.leadingAnchor],
-                    [self.webViewContainer.trailingAnchor constraintEqualToAnchor:mainView.trailingAnchor],
-                    [self.webViewContainer.topAnchor constraintEqualToAnchor:mainView.topAnchor constant:finalTopMargin],
-                    [self.webViewContainer.bottomAnchor constraintEqualToAnchor:mainView.bottomAnchor constant:-finalBottomMargin],
-                    
-                    // WebView constraints
-                    [self.embeddedWebView.leadingAnchor constraintEqualToAnchor:self.webViewContainer.leadingAnchor],
-                    [self.embeddedWebView.trailingAnchor constraintEqualToAnchor:self.webViewContainer.trailingAnchor],
-                    [self.embeddedWebView.topAnchor constraintEqualToAnchor:self.webViewContainer.topAnchor],
-                    [self.embeddedWebView.bottomAnchor constraintEqualToAnchor:self.webViewContainer.bottomAnchor],
-                    
-                    // Progress bar constraints
-                    [self.progressBar.leadingAnchor constraintEqualToAnchor:self.webViewContainer.leadingAnchor],
-                    [self.progressBar.trailingAnchor constraintEqualToAnchor:self.webViewContainer.trailingAnchor],
-                    [self.progressBar.bottomAnchor constraintEqualToAnchor:self.webViewContainer.bottomAnchor],
-                    [self.progressBar.heightAnchor constraintEqualToConstant:progressHeightValue]
+                    // Container
+                    [instance.container.leadingAnchor constraintEqualToAnchor:mainView.leadingAnchor],
+                    [instance.container.trailingAnchor constraintEqualToAnchor:mainView.trailingAnchor],
+                    [instance.container.topAnchor constraintEqualToAnchor:mainView.topAnchor constant:finalTopMargin],
+                    [instance.container.bottomAnchor constraintEqualToAnchor:mainView.bottomAnchor constant:-finalBottomMargin],
+
+                    // WebView
+                    [webView.leadingAnchor constraintEqualToAnchor:instance.container.leadingAnchor],
+                    [webView.trailingAnchor constraintEqualToAnchor:instance.container.trailingAnchor],
+                    [webView.topAnchor constraintEqualToAnchor:instance.container.topAnchor],
+                    [webView.bottomAnchor constraintEqualToAnchor:instance.container.bottomAnchor],
+
+                    // Progress bar
+                    [progressBar.leadingAnchor constraintEqualToAnchor:instance.container.leadingAnchor],
+                    [progressBar.trailingAnchor constraintEqualToAnchor:instance.container.trailingAnchor],
+                    [progressBar.bottomAnchor constraintEqualToAnchor:instance.container.bottomAnchor],
+                    [progressBar.heightAnchor constraintEqualToConstant:progressHeightValue]
                 ]];
-                
-                // Load URL
+
                 NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
-                
+
                 if (options[@"headers"]) {
                     NSDictionary *headers = options[@"headers"];
                     for (NSString *key in headers) {
                         [request setValue:headers[key] forHTTPHeaderField:key];
                     }
                 }
-                
-                [self.embeddedWebView loadRequest:request];
-                
-                NSLog(@"[EmbeddedWebView] WebView created successfully with progress bar");
-                
+
+                [webView loadRequest:request];
+
+                // Save instance
+                self.instances[instanceId] = instance;
+                self.lastCreatedId = instanceId;
+
+                NSLog(@"[EmbeddedWebView] WebView created successfully with progress bar (id=%@)", instanceId);
+
                 CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
                                                             messageAsString:@"WebView created successfully"];
                 [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
-                
+
             } @catch (NSException *exception) {
-                NSLog(@"[EmbeddedWebView] Error creating WebView: %@", exception.reason);
+                NSLog(@"[EmbeddedWebView] Error creating WebView (id=%@): %@", instanceId, exception.reason);
                 CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
                                                             messageAsString:[NSString stringWithFormat:@"Error creating WebView: %@", exception.reason]];
                 [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
@@ -194,120 +257,194 @@
     }];
 }
 
+#pragma mark - Destroy
+
+// JS: EmbeddedWebView.destroy(id, ...)
 - (void)destroy:(CDVInvokedUrlCommand*)command {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.embeddedWebView != nil) {
-            [self destroyWebView];
-            NSLog(@"[EmbeddedWebView] WebView destroyed");
-            
-            CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
-                                                        messageAsString:@"WebView destroyed"];
-            [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
-        } else {
-            CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
-                                                        messageAsString:@"No WebView to destroy"];
-            [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
-        }
-    });
+    NSString *instanceId = [command argumentAtIndex:0];
+
+    if (!instanceId || instanceId.length == 0) {
+        CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+                                                    messageAsString:@"id must be a non-empty string"];
+        [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
+        return;
+    }
+
+    [self destroyInstanceWithId:instanceId sendCallback:YES callbackId:command.callbackId];
 }
 
-- (void)destroyWebView {
-    if (self.embeddedWebView) {
-        @try {
-            [self.embeddedWebView removeObserver:self forKeyPath:@"estimatedProgress"];
-        } @catch (NSException *ex) {
-            // ignore if observer not attached
-        }
-        [self.embeddedWebView stopLoading];
-        [self.embeddedWebView removeFromSuperview];
-        self.embeddedWebView.navigationDelegate = nil;
-        self.embeddedWebView.UIDelegate = nil;
-        self.embeddedWebView = nil;
-    }
-    
-    if (self.progressBar) {
-        [self.progressBar removeFromSuperview];
-        self.progressBar = nil;
-    }
-    
-    if (self.webViewContainer) {
-        [self.webViewContainer removeFromSuperview];
-        self.webViewContainer = nil;
-    }
-}
+- (void)destroyInstanceWithId:(NSString *)instanceId
+                 sendCallback:(BOOL)sendCallback
+                   callbackId:(NSString *)callbackId {
 
-- (void)loadUrl:(CDVInvokedUrlCommand*)command {
-    NSString *url = [command argumentAtIndex:0];
-    NSDictionary *headers = [command argumentAtIndex:1 withDefault:nil];
-    
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.embeddedWebView != nil) {
-            @try {
-                NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
-                
-                if (headers) {
-                    for (NSString *key in headers) {
-                        [request setValue:headers[key] forHTTPHeaderField:key];
-                    }
-                }
-                
-                [self.embeddedWebView loadRequest:request];
-                
-                CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
-                                                            messageAsString:[NSString stringWithFormat:@"URL loaded: %@", url]];
-                [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
-            } @catch (NSException *exception) {
+        EmbeddedWebViewInstance *instance = self.instances[instanceId];
+        if (!instance) {
+            if (sendCallback) {
                 CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
-                                                            messageAsString:[NSString stringWithFormat:@"Error loading URL: %@", exception.reason]];
-                [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
+                                                            messageAsString:[NSString stringWithFormat:@"No WebView to destroy for id=%@", instanceId]];
+                [self.commandDelegate sendPluginResult:result callbackId:callbackId];
             }
-        } else {
+            return;
+        }
+
+        if (instance.webView) {
+            @try {
+                [instance.webView removeObserver:self forKeyPath:@"estimatedProgress"];
+            } @catch (NSException *ex) {
+                // ignore if observer not attached
+            }
+            [instance.webView stopLoading];
+            [instance.webView removeFromSuperview];
+            instance.webView.navigationDelegate = nil;
+            instance.webView.UIDelegate = nil;
+            instance.webView = nil;
+        }
+
+        if (instance.progressBar) {
+            [instance.progressBar removeFromSuperview];
+            instance.progressBar = nil;
+        }
+
+        if (instance.container) {
+            [instance.container removeFromSuperview];
+            instance.container = nil;
+        }
+
+        [self.instances removeObjectForKey:instanceId];
+
+        if ([self.lastCreatedId isEqualToString:instanceId]) {
+            self.lastCreatedId = self.instances.allKeys.firstObject;
+        }
+
+        NSLog(@"[EmbeddedWebView] WebView destroyed (id=%@)", instanceId);
+
+        if (sendCallback) {
+            CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
+                                                        messageAsString:[NSString stringWithFormat:@"WebView destroyed (id=%@)", instanceId]];
+            [self.commandDelegate sendPluginResult:result callbackId:callbackId];
+        }
+    });
+}
+
+- (void)destroyAllInstances {
+    NSArray<NSString *> *keys = [self.instances.allKeys copy];
+    for (NSString *instanceId in keys) {
+        [self destroyInstanceWithId:instanceId sendCallback:NO callbackId:nil];
+    }
+    [self.instances removeAllObjects];
+    self.lastCreatedId = nil;
+}
+
+#pragma mark - loadUrl
+
+// JS: EmbeddedWebView.loadUrl(id, url, headers?, ...)
+- (void)loadUrl:(CDVInvokedUrlCommand*)command {
+    NSString *instanceId = [command argumentAtIndex:0];
+    NSString *url = [command argumentAtIndex:1];
+    NSDictionary *headers = [command argumentAtIndex:2 withDefault:nil];
+
+    if (!instanceId || instanceId.length == 0) {
+        CDVPluginResult *res = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+                                                 messageAsString:@"id must be a non-empty string"];
+        [self.commandDelegate sendPluginResult:res callbackId:command.callbackId];
+        return;
+    }
+
+    if (!url || url.length == 0) {
+        CDVPluginResult *res = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+                                                 messageAsString:@"URL must be a non-empty string"];
+        [self.commandDelegate sendPluginResult:res callbackId:command.callbackId];
+        return;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
+        if (!instance) return;
+
+        @try {
+            NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
+
+            if (headers) {
+                for (NSString *key in headers) {
+                    [request setValue:headers[key] forHTTPHeaderField:key];
+                }
+            }
+
+            [instance.webView loadRequest:request];
+
+            CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
+                                                        messageAsString:[NSString stringWithFormat:@"URL loaded: %@", url]];
+            [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
+        } @catch (NSException *exception) {
             CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
-                                                        messageAsString:@"WebView not initialized"];
+                                                        messageAsString:[NSString stringWithFormat:@"Error loading URL: %@", exception.reason]];
             [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
         }
     });
 }
 
+#pragma mark - executeScript
+
+// JS: EmbeddedWebView.executeScript(id, script, ...)
 - (void)executeScript:(CDVInvokedUrlCommand*)command {
-    NSString *script = [command argumentAtIndex:0];
-    
+    NSString *instanceId = [command argumentAtIndex:0];
+    NSString *script = [command argumentAtIndex:1];
+
+    if (!instanceId || instanceId.length == 0) {
+        CDVPluginResult *res = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+                                                 messageAsString:@"id must be a non-empty string"];
+        [self.commandDelegate sendPluginResult:res callbackId:command.callbackId];
+        return;
+    }
+
     if (!script || script.length == 0) {
         CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
                                                     messageAsString:@"script must be a non-empty string"];
         [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
         return;
     }
-    
+
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.embeddedWebView != nil) {
-            [self.embeddedWebView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
-                if (error) {
-                    CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
-                                                                     messageAsString:error.localizedDescription];
-                    [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
-                } else {
-                    NSString *resultString = result ? [NSString stringWithFormat:@"%@", result] : @"";
-                    CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
-                                                                     messageAsString:resultString];
-                    [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
-                }
-            }];
-        } else {
-            CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
-                                                        messageAsString:@"WebView not initialized"];
-            [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
-        }
+        EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
+        if (!instance) return;
+
+        [instance.webView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
+            if (error) {
+                CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+                                                                 messageAsString:error.localizedDescription];
+                [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+            } else {
+                NSString *resultString = result ? [NSString stringWithFormat:@"%@", result] : @"";
+                CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
+                                                                 messageAsString:resultString];
+                [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+            }
+        }];
     });
 }
 
+#pragma mark - setVisible
+
+// JS: EmbeddedWebView.setVisible(id, visible, ...)
 - (void)setVisible:(CDVInvokedUrlCommand*)command {
-    BOOL visible = [[command argumentAtIndex:0] boolValue];
-    
+    NSString *instanceId = [command argumentAtIndex:0];
+    BOOL visible = [[command argumentAtIndex:1] boolValue];
+
+    if (!instanceId || instanceId.length == 0) {
+        CDVPluginResult *res = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+                                                 messageAsString:@"id must be a non-empty string"];
+        [self.commandDelegate sendPluginResult:res callbackId:command.callbackId];
+        return;
+    }
+
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.webViewContainer != nil) {
-            self.webViewContainer.hidden = !visible;
-            
+        EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
+        if (!instance) return;
+
+        if (instance.container != nil) {
+            instance.container.hidden = !visible;
+
             CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
                                                         messageAsString:[NSString stringWithFormat:@"Visibility changed to: %@", visible ? @"true" : @"false"]];
             [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
@@ -319,69 +456,96 @@
     });
 }
 
+#pragma mark - reload
+
+// JS: EmbeddedWebView.reload(id, ...)
 - (void)reload:(CDVInvokedUrlCommand*)command {
+    NSString *instanceId = [command argumentAtIndex:0];
+
+    if (!instanceId || instanceId.length == 0) {
+        CDVPluginResult *res = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+                                                 messageAsString:@"id must be a non-empty string"];
+        [self.commandDelegate sendPluginResult:res callbackId:command.callbackId];
+        return;
+    }
+
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.embeddedWebView != nil) {
-            [self.embeddedWebView reload];
-            
-            CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
-                                                        messageAsString:@"WebView reloaded"];
-            [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
-        } else {
-            CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
-                                                        messageAsString:@"WebView not initialized"];
-            [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
-        }
+        EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
+        if (!instance) return;
+
+        [instance.webView reload];
+
+        CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
+                                                    messageAsString:@"WebView reloaded"];
+        [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
     });
 }
 
+#pragma mark - goBack
+
+// JS: EmbeddedWebView.goBack(id, ...)
 - (void)goBack:(CDVInvokedUrlCommand*)command {
+    NSString *instanceId = [command argumentAtIndex:0];
+
+    if (!instanceId || instanceId.length == 0) {
+        CDVPluginResult *res = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+                                                 messageAsString:@"id must be a non-empty string"];
+        [self.commandDelegate sendPluginResult:res callbackId:command.callbackId];
+        return;
+    }
+
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.embeddedWebView != nil) {
-            if ([self.embeddedWebView canGoBack]) {
-                [self.embeddedWebView goBack];
-                
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    [self updateNavigationState];
-                });
-                
-                CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
-                                                            messageAsString:@"Navigated back"];
-                [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
-            } else {
-                CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
-                                                            messageAsString:@"Cannot go back"];
-                [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
-            }
+        EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
+        if (!instance) return;
+
+        if ([instance.webView canGoBack]) {
+            [instance.webView goBack];
+
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [self updateNavigationStateForInstanceId:instanceId];
+            });
+
+            CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
+                                                        messageAsString:@"Navigated back"];
+            [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
         } else {
             CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
-                                                        messageAsString:@"WebView not initialized"];
+                                                        messageAsString:@"Cannot go back"];
             [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
         }
     });
 }
 
+#pragma mark - goForward
+
+// JS: EmbeddedWebView.goForward(id, ...)
 - (void)goForward:(CDVInvokedUrlCommand*)command {
+    NSString *instanceId = [command argumentAtIndex:0];
+
+    if (!instanceId || instanceId.length == 0) {
+        CDVPluginResult *res = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+                                                 messageAsString:@"id must be a non-empty string"];
+        [self.commandDelegate sendPluginResult:res callbackId:command.callbackId];
+        return;
+    }
+
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.embeddedWebView != nil) {
-            if ([self.embeddedWebView canGoForward]) {
-                [self.embeddedWebView goForward];
-                
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    [self updateNavigationState];
-                });
-                
-                CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
-                                                            messageAsString:@"Navigated forward"];
-                [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
-            } else {
-                CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
-                                                            messageAsString:@"Cannot go forward"];
-                [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
-            }
+        EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
+        if (!instance) return;
+
+        if ([instance.webView canGoForward]) {
+            [instance.webView goForward];
+
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [self updateNavigationStateForInstanceId:instanceId];
+            });
+
+            CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
+                                                        messageAsString:@"Navigated forward"];
+            [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
         } else {
             CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
-                                                        messageAsString:@"WebView not initialized"];
+                                                        messageAsString:@"Cannot go forward"];
             [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
         }
     });
@@ -391,32 +555,38 @@
 
 - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.progressBar) {
-            self.progressBar.hidden = NO;
-            [self.progressBar setProgress:0.0 animated:NO];
+        NSString *instanceId = [self instanceIdForWebView:webView];
+        EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
+
+        if (instance && instance.progressBar) {
+            instance.progressBar.hidden = NO;
+            [instance.progressBar setProgress:0.0 animated:NO];
         }
-        
+
         NSString *url = webView.URL.absoluteString;
-        NSLog(@"[EmbeddedWebView] Page started loading: %@", url);
+        NSLog(@"[EmbeddedWebView] Page started loading (id=%@): %@", instanceId, url);
         [self fireEvent:@"loadStart" withData:url];
     });
 }
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.progressBar) {
-            [self.progressBar setProgress:1.0 animated:YES];
+        NSString *instanceId = [self instanceIdForWebView:webView];
+        EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
+
+        if (instance && instance.progressBar) {
+            [instance.progressBar setProgress:1.0 animated:YES];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                self.progressBar.hidden = YES;
+                instance.progressBar.hidden = YES;
             });
         }
-        
-        // Inject smooth scrolling CSS
+
+        // Smooth scrolling CSS
         NSString *css = @"html, body { scroll-behavior: smooth !important; -webkit-overflow-scrolling: touch; }";
         NSString *js = [NSString stringWithFormat:@"var style = document.createElement('style'); style.innerHTML = '%@'; document.head.appendChild(style);", css];
         [webView evaluateJavaScript:js completionHandler:nil];
-        
-        // Fallback: rewrite target="_blank" anchors and override window.open + delegated click capture (SPA)
+
+        // Rewrite target=_blank and window.open
         NSString *rewriteJS =
         @"(function() { \
             try { \
@@ -429,29 +599,37 @@
             } catch(err) { console.warn('embeddedwebview rewrite error', err); } \
         })();";
         [webView evaluateJavaScript:rewriteJS completionHandler:nil];
-        
+
         NSString *url = webView.URL.absoluteString;
-        NSLog(@"[EmbeddedWebView] Page finished loading: %@", url);
-        
-        [self updateNavigationState];
+        NSLog(@"[EmbeddedWebView] Page finished loading (id=%@): %@", instanceId, url);
+
+        if (instanceId) {
+            [self updateNavigationStateForInstanceId:instanceId];
+        }
         [self fireEvent:@"loadStop" withData:url];
     });
 }
 
-- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+- (void)webView:(WKWebView *)webView
+didFailProvisionalNavigation:(WKNavigation *)navigation
+      withError:(NSError *)error {
+
     NSString *url = webView.URL.absoluteString;
     NSString *errorData = [NSString stringWithFormat:@"{\"url\":\"%@\",\"code\":%ld,\"message\":\"%@\"}",
                            url, (long)error.code, error.localizedDescription];
-    
+
     NSLog(@"[EmbeddedWebView] Error loading page: %@", error.localizedDescription);
     [self fireEvent:@"loadError" withData:errorData];
 }
 
-- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+- (void)webView:(WKWebView *)webView
+didFailNavigation:(WKNavigation *)navigation
+      withError:(NSError *)error {
+
     NSString *url = webView.URL.absoluteString;
     NSString *errorData = [NSString stringWithFormat:@"{\"url\":\"%@\",\"code\":%ld,\"message\":\"%@\"}",
                            url, (long)error.code, error.localizedDescription];
-    
+
     NSLog(@"[EmbeddedWebView] Navigation error: %@", error.localizedDescription);
     [self fireEvent:@"loadError" withData:errorData];
 }
@@ -461,27 +639,23 @@
 - (void)webView:(WKWebView *)webView
 decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
 decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
-    
-    // If targetFrame == nil, it's a new-window request (target=_blank or window.open)
+
     if (navigationAction.targetFrame == nil) {
-        // Load in same webview and cancel the system new-window behavior
         [webView loadRequest:navigationAction.request];
         decisionHandler(WKNavigationActionPolicyCancel);
         return;
     }
-    
+
     decisionHandler(WKNavigationActionPolicyAllow);
 }
 
 #pragma mark - WKUIDelegate
 
-// Invoked when page requests a new window (target=_blank or window.open)
-// We'll capture and load in same webview and return nil (no new webview)
 - (WKWebView *)webView:(WKWebView *)webView
 createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
     forNavigationAction:(WKNavigationAction *)navigationAction
          windowFeatures:(WKWindowFeatures *)windowFeatures {
-    
+
     if (navigationAction.request && navigationAction.targetFrame == nil) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [webView loadRequest:navigationAction.request];
@@ -496,41 +670,47 @@ createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
                       ofObject:(id)object
                         change:(NSDictionary<NSKeyValueChangeKey,id> *)change
                        context:(void *)context {
-    if ([keyPath isEqualToString:@"estimatedProgress"] && object == self.embeddedWebView) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            float progress = self.embeddedWebView.estimatedProgress;
-            if (self.progressBar) {
-                [self.progressBar setProgress:progress animated:YES];
-                NSLog(@"[EmbeddedWebView] Loading progress: %.0f%%", progress * 100);
-            }
-        });
+
+    if ([keyPath isEqualToString:@"estimatedProgress"]) {
+        WKWebView *webView = (WKWebView *)object;
+        NSString *instanceId = [self instanceIdForWebView:webView];
+        EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
+
+        if (instance && instance.progressBar) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                float progress = webView.estimatedProgress;
+                [instance.progressBar setProgress:progress animated:YES];
+                NSLog(@"[EmbeddedWebView] Loading progress (id=%@): %.0f%%", instanceId, progress * 100);
+            });
+        }
     } else {
         [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
     }
 }
 
-#pragma mark - Helper Methods
+#pragma mark - Helper methods
 
-- (void)updateNavigationState {
-    if (self.embeddedWebView) {
-        BOOL newCanGoBack = [self.embeddedWebView canGoBack];
-        BOOL newCanGoForward = [self.embeddedWebView canGoForward];
-        
-        if (newCanGoBack != self.canGoBack) {
-            self.canGoBack = newCanGoBack;
-            [self fireEvent:@"canGoBackChanged" withData:self.canGoBack ? @"true" : @"false"];
-        }
-        
-        if (newCanGoForward != self.canGoForward) {
-            self.canGoForward = newCanGoForward;
-            [self fireEvent:@"canGoForwardChanged" withData:self.canGoForward ? @"true" : @"false"];
-        }
-        
-        NSString *navigationState = [NSString stringWithFormat:@"{\"canGoBack\":%@,\"canGoForward\":%@}",
-                                     self.canGoBack ? @"true" : @"false",
-                                     self.canGoForward ? @"true" : @"false"];
-        [self fireEvent:@"navigationStateChanged" withData:navigationState];
+- (void)updateNavigationStateForInstanceId:(NSString *)instanceId {
+    EmbeddedWebViewInstance *instance = self.instances[instanceId];
+    if (!instance || !instance.webView) return;
+
+    BOOL newCanGoBack = [instance.webView canGoBack];
+    BOOL newCanGoForward = [instance.webView canGoForward];
+
+    if (newCanGoBack != instance.canGoBack) {
+        instance.canGoBack = newCanGoBack;
+        [self fireEvent:@"canGoBackChanged" withData:instance.canGoBack ? @"true" : @"false"];
     }
+
+    if (newCanGoForward != instance.canGoForward) {
+        instance.canGoForward = newCanGoForward;
+        [self fireEvent:@"canGoForwardChanged" withData:instance.canGoForward ? @"true" : @"false"];
+    }
+
+    NSString *navigationState = [NSString stringWithFormat:@"{\"canGoBack\":%@,\"canGoForward\":%@}",
+                                 instance.canGoBack ? @"true" : @"false",
+                                 instance.canGoForward ? @"true" : @"false"];
+    [self fireEvent:@"navigationStateChanged" withData:navigationState];
 }
 
 - (void)fireEvent:(NSString *)eventName withData:(NSString *)data {
@@ -539,12 +719,13 @@ createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
         if (![data hasPrefix:@"{"]) {
             dataFormatted = [NSString stringWithFormat:@"'%@'", data];
         }
-        
-        NSString *js = [NSString stringWithFormat:@"cordova.fireDocumentEvent('embeddedwebview.%@', {detail: %@});",
+
+        NSString *js = [NSString stringWithFormat:
+                        @"cordova.fireDocumentEvent('embeddedwebview.%@', {detail: %@});",
                         eventName, dataFormatted];
-        
+
         NSLog(@"[EmbeddedWebView] Firing event: %@ with data: %@", eventName, data);
-        
+
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.commandDelegate evalJs:js];
         });
@@ -560,7 +741,7 @@ createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
     unsigned rgbValue = 0;
     NSScanner *scanner = [NSScanner scannerWithString:hexString];
     if ([hexString hasPrefix:@"#"]) {
-        [scanner setScanLocation:1]; // Skip '#'
+        [scanner setScanLocation:1];
     } else {
         [scanner setScanLocation:0];
     }
@@ -574,11 +755,11 @@ createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
 #pragma mark - Lifecycle
 
 - (void)dispose {
-    [self destroyWebView];
+    [self destroyAllInstances];
 }
 
 - (void)onReset {
-    [self destroyWebView];
+    [self destroyAllInstances];
 }
 
 @end
