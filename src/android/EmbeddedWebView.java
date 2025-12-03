@@ -31,11 +31,19 @@ import java.util.Map;
 public class EmbeddedWebView extends CordovaPlugin {
 
     private static final String TAG = "EmbeddedWebView";
-    private WebView embeddedWebView;
-    private ProgressBar progressBar;
-    private org.apache.cordova.CordovaWebView cordovaWebView;
-    private boolean canGoBack = false;
-    private boolean canGoForward = false;
+
+    private static class WebViewInstance {
+        WebView webView;
+        FrameLayout container;
+        ProgressBar progressBar;
+        boolean canGoBack = false;
+        boolean canGoForward = false;
+    }
+
+    private final Map<String, WebViewInstance> instances = new HashMap<>();
+    private String lastCreatedId = null;
+
+    private CordovaWebView cordovaWebView;
 
     @Override
     public void initialize(CordovaInterface cordova, CordovaWebView webView) {
@@ -47,72 +55,121 @@ public class EmbeddedWebView extends CordovaPlugin {
     public boolean execute(String action, JSONArray args, CallbackContext callbackContext)
             throws JSONException {
 
-        if (action.equals("create")) {
-            String url = args.getString(0);
-            JSONObject options = args.getJSONObject(1);
-            this.create(url, options, callbackContext);
+        if ("create".equals(action)) {
+            // args[0] = id, args[1] = url, args[2] = options
+            String id = args.getString(0);
+            String url = args.getString(1);
+            JSONObject options = args.getJSONObject(2);
+            this.create(id, url, options, callbackContext);
             return true;
         }
 
-        if (action.equals("destroy")) {
-            this.destroy(callbackContext);
+        if ("destroy".equals(action)) {
+            // args[0] = id
+            String id = args.getString(0);
+            this.destroy(id, callbackContext);
             return true;
         }
 
-        if (action.equals("loadUrl")) {
-            String url = args.getString(0);
-            JSONObject headers = args.optJSONObject(1);
-            this.loadUrl(url, headers, callbackContext);
+        if ("loadUrl".equals(action)) {
+            // args[0] = id, args[1] = url, args[2] = headers (optional)
+            String id = args.getString(0);
+            String url = args.getString(1);
+            JSONObject headers = args.optJSONObject(2);
+            this.loadUrl(id, url, headers, callbackContext);
             return true;
         }
 
-        if (action.equals("executeScript")) {
-            String script = args.getString(0);
-            this.executeScript(script, callbackContext);
+        if ("executeScript".equals(action)) {
+            // args[0] = id, args[1] = script
+            String id = args.getString(0);
+            String script = args.getString(1);
+            this.executeScript(id, script, callbackContext);
             return true;
         }
 
-        if (action.equals("setVisible")) {
-            boolean visible = args.getBoolean(0);
-            this.setVisible(visible, callbackContext);
+        if ("setVisible".equals(action)) {
+            // args[0] = id, args[1] = visible
+            String id = args.getString(0);
+            boolean visible = args.getBoolean(1);
+            this.setVisible(id, visible, callbackContext);
             return true;
         }
 
-        if (action.equals("reload")) {
-            this.reload(callbackContext);
+        if ("reload".equals(action)) {
+            // args[0] = id
+            String id = args.getString(0);
+            this.reload(id, callbackContext);
             return true;
         }
 
-        if (action.equals("goBack")) {
-            this.goBack(callbackContext);
+        if ("goBack".equals(action)) {
+            // args[0] = id
+            String id = args.getString(0);
+            this.goBack(id, callbackContext);
             return true;
         }
 
-        if (action.equals("goForward")) {
-            this.goForward(callbackContext);
+        if ("goForward".equals(action)) {
+            // args[0] = id
+            String id = args.getString(0);
+            this.goForward(id, callbackContext);
+            return true;
+        }
+
+        if ("canGoBack".equals(action)) {
+            // optional: per-instance canGoBack
+            String id = args.getString(0);
+            this.canGoBack(id, callbackContext);
             return true;
         }
 
         return false;
     }
 
+    /**
+     * Use last created instance as "active" for back button.
+     */
     public boolean onBackPressed() {
-        if (embeddedWebView != null && embeddedWebView.canGoBack()) {
+        if (lastCreatedId == null) {
+            return false;
+        }
+
+        WebViewInstance instance = instances.get(lastCreatedId);
+        if (instance != null && instance.webView != null && instance.webView.canGoBack()) {
             cordova.getActivity().runOnUiThread(() -> {
-                embeddedWebView.goBack();
-                Log.d(TAG, "Back button intercepted - navigated back in WebView");
+                instance.webView.goBack();
+                Log.d(TAG, "Back button intercepted - navigated back in WebView (id=" + lastCreatedId + ")");
+                updateNavigationState(lastCreatedId);
             });
             return true;
         }
+
         return false;
     }
 
-    private void create(final String url, final JSONObject options, final CallbackContext callbackContext) {
-        Log.d(TAG, "Creating WebView");
+    private WebViewInstance getInstance(String id, CallbackContext callbackContext) {
+        WebViewInstance instance = instances.get(id);
+        if (instance == null || instance.webView == null) {
+            if (callbackContext != null) {
+                callbackContext.error("WebView instance not found for id: " + id);
+            }
+            return null;
+        }
+        return instance;
+    }
 
-        if (embeddedWebView != null) {
-            Log.w(TAG, "WebView already exists, destroying before creating a new one");
-            destroy(callbackContext);
+    private void create(final String id,
+                        final String url,
+                        final JSONObject options,
+                        final CallbackContext callbackContext) {
+
+        Log.d(TAG, "Creating WebView (id=" + id + ")");
+
+        // If instance already exists for this id, destroy it first
+        if (instances.containsKey(id)) {
+            Log.w(TAG, "WebView for id=" + id + " already exists, destroying before creating a new one");
+            destroy(id, null); // no callback here, this is internal
         }
 
         cordova.getActivity().runOnUiThread(() -> {
@@ -120,7 +177,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                 int topOffset = options.optInt("top", 0);
                 int bottomOffset = options.optInt("bottom", 0);
 
-                Log.d(TAG, "WebView config - URL: " + url);
+                Log.d(TAG, "WebView config (id=" + id + ") - URL: " + url);
                 Log.d(TAG, "User offsets - Top: " + topOffset + "px, Bottom: " + bottomOffset + "px");
 
                 ViewGroup decorView = (ViewGroup) cordova.getActivity().getWindow().getDecorView();
@@ -156,9 +213,9 @@ public class EmbeddedWebView extends CordovaPlugin {
 
                 FrameLayout webViewContainer = new FrameLayout(cordova.getActivity());
 
-                embeddedWebView = new WebView(cordova.getActivity());
+                WebView webView = new WebView(cordova.getActivity());
 
-                WebSettings settings = embeddedWebView.getSettings();
+                WebSettings settings = webView.getSettings();
                 settings.setJavaScriptEnabled(true);
                 settings.setDomStorageEnabled(true);
                 settings.setDatabaseEnabled(true);
@@ -166,7 +223,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                 settings.setAllowContentAccess(true);
                 settings.setLoadWithOverviewMode(true);
                 settings.setUseWideViewPort(true);
-                // allow window.open and multiple windows so onCreateWindow can be called
                 settings.setJavaScriptCanOpenWindowsAutomatically(true);
                 settings.setSupportMultipleWindows(true);
 
@@ -176,7 +232,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                 }
 
                 if (options.optBoolean("clearCache", false)) {
-                    embeddedWebView.clearCache(true);
+                    webView.clearCache(true);
                 }
 
                 if (options.has("userAgent")) {
@@ -188,25 +244,27 @@ public class EmbeddedWebView extends CordovaPlugin {
                 settings.setCacheMode(WebSettings.LOAD_DEFAULT);
                 settings.setEnableSmoothTransition(true);
 
-                embeddedWebView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+                webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
 
                 // Scrollbars
-                embeddedWebView.setVerticalScrollBarEnabled(false);
-                embeddedWebView.setHorizontalScrollBarEnabled(false);
-                embeddedWebView.setScrollbarFadingEnabled(true);
-                embeddedWebView.setOverScrollMode(WebView.OVER_SCROLL_NEVER);
-                embeddedWebView.setScrollBarStyle(View.SCROLLBARS_INSIDE_OVERLAY);
+                webView.setVerticalScrollBarEnabled(false);
+                webView.setHorizontalScrollBarEnabled(false);
+                webView.setScrollbarFadingEnabled(true);
+                webView.setOverScrollMode(WebView.OVER_SCROLL_NEVER);
+                webView.setScrollBarStyle(View.SCROLLBARS_INSIDE_OVERLAY);
 
-                progressBar = new ProgressBar(
+                ProgressBar progressBar = new ProgressBar(
                         cordova.getActivity(),
                         null,
-                        android.R.attr.progressBarStyleHorizontal);
+                        android.R.attr.progressBarStyleHorizontal
+                );
 
                 String progressColor = options.optString("progressColor", "#2196F3");
                 try {
                     progressBar.getProgressDrawable().setColorFilter(
                             Color.parseColor(progressColor),
-                            PorterDuff.Mode.SRC_IN);
+                            PorterDuff.Mode.SRC_IN
+                    );
                 } catch (Exception e) {
                     Log.w(TAG, "Invalid progress color, using default");
                 }
@@ -217,13 +275,14 @@ public class EmbeddedWebView extends CordovaPlugin {
 
                 FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        progressHeightPx);
+                        progressHeightPx
+                );
                 progressParams.gravity = android.view.Gravity.BOTTOM;
                 progressBar.setMax(100);
                 progressBar.setProgress(0);
                 progressBar.setVisibility(View.GONE);
 
-                embeddedWebView.setWebViewClient(new WebViewClient() {
+                webView.setWebViewClient(new WebViewClient() {
                     @Override
                     public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
                         super.onPageStarted(view, url, favicon);
@@ -231,7 +290,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                             progressBar.setVisibility(View.VISIBLE);
                             progressBar.setProgress(0);
                         }
-                        Log.d(TAG, "Page started loading: " + url);
+                        Log.d(TAG, "Page started loading (id=" + id + "): " + url);
                         fireEvent("loadStart", url);
                     }
 
@@ -247,57 +306,52 @@ public class EmbeddedWebView extends CordovaPlugin {
                             }, 200);
                         }
 
-                        // Smooth scrolling
                         String css = "html, body { scroll-behavior: smooth !important; }";
                         String js = "let style = document.createElement('style');"
                                 + "style.innerHTML = `" + css + "`;"
                                 + "document.head.appendChild(style);";
                         view.evaluateJavascript(js, null);
 
-                        // Fallback JS: rewrite target="_blank" and override window.open to use same window
                         String rewriteTargets =
-                            "(() => { " +
-                            "try { " +
-                            "document.querySelectorAll('a[target=\"_blank\"]').forEach(a => a.target = '_self');" +
-                            "window.open = function(url) { window.location.href = url; };" +
-                            // click-capture for delegated anchors (SPA)
-                            "document.addEventListener('click', function(e){ " +
-                            " var node = e.target; while(node && node.tagName !== 'A') node = node.parentElement; " +
-                            " if (node && node.tagName === 'A') { var href = node.getAttribute('href'); var target = node.getAttribute('target'); if (href && target === '_blank') { e.preventDefault(); window.location.href = href; } } " +
-                            "}, true);" +
-                            "} catch(e) { console.warn('rewriteTargets failed', e); }" +
-                            "})();";
+                                "(() => { " +
+                                        "try { " +
+                                        "document.querySelectorAll('a[target=\"_blank\"]').forEach(a => a.target = '_self');" +
+                                        "window.open = function(url) { window.location.href = url; };" +
+                                        "document.addEventListener('click', function(e){ " +
+                                        " var node = e.target; while(node && node.tagName !== 'A') node = node.parentElement; " +
+                                        " if (node && node.tagName === 'A') { var href = node.getAttribute('href'); var target = node.getAttribute('target'); if (href && target === '_blank') { e.preventDefault(); window.location.href = href; } } " +
+                                        "}, true);" +
+                                        "} catch(e) { console.warn('rewriteTargets failed', e); }" +
+                                        "})();";
                         view.evaluateJavascript(rewriteTargets, null);
 
-                        Log.d(TAG, "Page finished loading: " + url);
+                        Log.d(TAG, "Page finished loading (id=" + id + "): " + url);
 
-                        updateNavigationState();
+                        updateNavigationState(id);
                         fireEvent("loadStop", url);
                     }
 
                     @Override
                     public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
                         super.onReceivedError(view, errorCode, description, failingUrl);
-                        Log.e(TAG, "Error loading page: " + description);
+                        Log.e(TAG, "Error loading page (id=" + id + "): " + description);
                         fireEvent("loadError", "{\"url\":\"" + failingUrl + "\",\"code\":" + errorCode
                                 + ",\"message\":\"" + description + "\"}");
                     }
                 });
 
-                // WebChromeClient with onCreateWindow to capture target=_blank / window.open popups
-                embeddedWebView.setWebChromeClient(new WebChromeClient() {
+                webView.setWebChromeClient(new WebChromeClient() {
                     @Override
                     public void onProgressChanged(WebView view, int newProgress) {
                         super.onProgressChanged(view, newProgress);
                         if (progressBar != null) {
                             progressBar.setProgress(newProgress);
-                            Log.d(TAG, "Loading progress: " + newProgress + "%");
+                            Log.d(TAG, "Loading progress (id=" + id + "): " + newProgress + "%");
                         }
                     }
 
                     @Override
                     public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, Message resultMsg) {
-                        // temp WebView to capture the popup's request
                         WebView popupWebView = new WebView(view.getContext());
                         WebSettings popupSettings = popupWebView.getSettings();
                         popupSettings.setJavaScriptEnabled(true);
@@ -307,14 +361,16 @@ public class EmbeddedWebView extends CordovaPlugin {
                         popupWebView.setWebViewClient(new WebViewClient() {
                             @Override
                             public boolean shouldOverrideUrlLoading(WebView wv, String url) {
-                                // forward URL to main embeddedWebView
                                 cordova.getActivity().runOnUiThread(() -> {
-                                    if (embeddedWebView != null) {
-                                        embeddedWebView.loadUrl(url);
+                                    WebViewInstance instance = instances.get(id);
+                                    if (instance != null && instance.webView != null) {
+                                        instance.webView.loadUrl(url);
                                     }
                                 });
-                                // cleanup
-                                try { wv.stopLoading(); wv.destroy(); } catch (Exception ignored) {}
+                                try {
+                                    wv.stopLoading();
+                                    wv.destroy();
+                                } catch (Exception ignored) {}
                                 return true;
                             }
 
@@ -322,11 +378,15 @@ public class EmbeddedWebView extends CordovaPlugin {
                             public boolean shouldOverrideUrlLoading(WebView wv, WebResourceRequest request) {
                                 final String reqUrl = request.getUrl().toString();
                                 cordova.getActivity().runOnUiThread(() -> {
-                                    if (embeddedWebView != null) {
-                                        embeddedWebView.loadUrl(reqUrl);
+                                    WebViewInstance instance = instances.get(id);
+                                    if (instance != null && instance.webView != null) {
+                                        instance.webView.loadUrl(reqUrl);
                                     }
                                 });
-                                try { wv.stopLoading(); wv.destroy(); } catch (Exception ignored) {}
+                                try {
+                                    wv.stopLoading();
+                                    wv.destroy();
+                                } catch (Exception ignored) {}
                                 return true;
                             }
                         });
@@ -338,25 +398,25 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
                 });
 
-                embeddedWebView.setBackgroundColor(Color.TRANSPARENT);
+                webView.setBackgroundColor(Color.TRANSPARENT);
 
                 FrameLayout.LayoutParams webViewParams = new FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT);
-                webViewContainer.addView(embeddedWebView, webViewParams);
-
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                );
+                webViewContainer.addView(webView, webViewParams);
                 webViewContainer.addView(progressBar, progressParams);
 
                 ViewGroup contentView = (ViewGroup) decorView.findViewById(android.R.id.content);
 
                 FrameLayout.LayoutParams containerParams = new FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT);
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                );
                 containerParams.topMargin = finalTopMargin;
                 containerParams.bottomMargin = finalBottomMargin;
 
                 contentView.addView(webViewContainer, containerParams);
-
                 webViewContainer.bringToFront();
 
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
@@ -370,167 +430,203 @@ public class EmbeddedWebView extends CordovaPlugin {
                 if (options.has("headers")) {
                     JSONObject headersJson = options.getJSONObject("headers");
                     Map<String, String> headers = jsonToMap(headersJson);
-                    embeddedWebView.loadUrl(url, headers);
+                    webView.loadUrl(url, headers);
                 } else {
-                    embeddedWebView.loadUrl(url);
+                    webView.loadUrl(url);
                 }
 
-                Log.d(TAG, "WebView created successfully with progress bar");
-                callbackContext.success("WebView created successfully");
+                WebViewInstance instance = new WebViewInstance();
+                instance.webView = webView;
+                instance.container = webViewContainer;
+                instance.progressBar = progressBar;
+                instances.put(id, instance);
+                lastCreatedId = id;
+
+                Log.d(TAG, "WebView created successfully with progress bar (id=" + id + ")");
+                if (callbackContext != null) {
+                    callbackContext.success("WebView created successfully for id=" + id);
+                }
 
             } catch (Exception e) {
-                Log.e(TAG, "Error creating WebView: " + e.getMessage());
+                Log.e(TAG, "Error creating WebView (id=" + id + "): " + e.getMessage());
                 e.printStackTrace();
-                callbackContext.error("Error creating WebView: " + e.getMessage());
+                if (callbackContext != null) {
+                    callbackContext.error("Error creating WebView: " + e.getMessage());
+                }
             }
         });
     }
 
-    private void destroy(final CallbackContext callbackContext) {
-        cordova.getActivity().runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                if (embeddedWebView != null) {
-                    ViewGroup parent = (ViewGroup) embeddedWebView.getParent();
-                    if (parent != null) {
-                        ViewGroup grandParent = (ViewGroup) parent.getParent();
-                        if (grandParent != null) {
-                            grandParent.removeView(parent);
+    private void destroy(final String id, final CallbackContext callbackContext) {
+        cordova.getActivity().runOnUiThread(() -> {
+            WebViewInstance instance = instances.remove(id);
+            if (instance != null && instance.webView != null) {
+                try {
+                    if (instance.container != null) {
+                        ViewGroup parent = (ViewGroup) instance.container.getParent();
+                        if (parent != null) {
+                            parent.removeView(instance.container);
                         }
-                    }
-                    embeddedWebView.destroy();
-                    embeddedWebView = null;
-                    progressBar = null;
-                    Log.d(TAG, "WebView destroyed");
-                    callbackContext.success("WebView destroyed");
-                } else {
-                    callbackContext.error("No WebView to destroy");
-                }
-            }
-        });
-    }
-
-    private void loadUrl(final String url, final JSONObject headers,
-            final CallbackContext callbackContext) {
-
-        cordova.getActivity().runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                if (embeddedWebView != null) {
-                    try {
-                        if (headers != null && headers.length() > 0) {
-                            Map<String, String> headerMap = jsonToMap(headers);
-                            embeddedWebView.loadUrl(url, headerMap);
-                        } else {
-                            embeddedWebView.loadUrl(url);
-                        }
-                        callbackContext.success("URL loaded: " + url);
-                    } catch (Exception e) {
-                        callbackContext.error("Error loading URL: " + e.getMessage());
-                    }
-                } else {
-                    callbackContext.error("WebView not initialized");
-                }
-            }
-        });
-    }
-
-    private void executeScript(final String script, final CallbackContext callbackContext) {
-        cordova.getActivity().runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                if (embeddedWebView != null) {
-                    embeddedWebView.evaluateJavascript(script, new ValueCallback<String>() {
-                        @Override
-                        public void onReceiveValue(String result) {
-                            callbackContext.success(result);
-                        }
-                    });
-                } else {
-                    callbackContext.error("WebView not initialized");
-                }
-            }
-        });
-    }
-
-    private void setVisible(final boolean visible, final CallbackContext callbackContext) {
-        cordova.getActivity().runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                if (embeddedWebView != null) {
-                    ViewGroup container = (ViewGroup) embeddedWebView.getParent();
-                    if (container != null) {
-                        container.setVisibility(visible ? View.VISIBLE : View.GONE);
-                    }
-                    callbackContext.success("Visibility changed to: " + visible);
-                } else {
-                    callbackContext.error("WebView not initialized");
-                }
-            }
-        });
-    }
-
-    private void reload(final CallbackContext callbackContext) {
-        cordova.getActivity().runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                if (embeddedWebView != null) {
-                    embeddedWebView.reload();
-                    callbackContext.success("WebView reloaded");
-                } else {
-                    callbackContext.error("WebView not initialized");
-                }
-            }
-        });
-    }
-
-    private void goBack(final CallbackContext callbackContext) {
-        cordova.getActivity().runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                if (embeddedWebView != null) {
-                    if (embeddedWebView.canGoBack()) {
-                        embeddedWebView.goBack();
-                        embeddedWebView.postDelayed(() -> updateNavigationState(), 100);
-                        callbackContext.success("Navigated back");
                     } else {
-                        callbackContext.error("Cannot go back");
+                        // fallback: old logic
+                        ViewGroup parent = (ViewGroup) instance.webView.getParent();
+                        if (parent != null) {
+                            ViewGroup grandParent = (ViewGroup) parent.getParent();
+                            if (grandParent != null) {
+                                grandParent.removeView(parent);
+                            }
+                        }
                     }
-                } else {
-                    callbackContext.error("WebView not initialized");
+
+                    instance.webView.destroy();
+                    instance.webView = null;
+                    instance.progressBar = null;
+
+                    if (id.equals(lastCreatedId)) {
+                        lastCreatedId = instances.isEmpty() ? null : instances.keySet().iterator().next();
+                    }
+
+                    Log.d(TAG, "WebView destroyed (id=" + id + ")");
+                    if (callbackContext != null) {
+                        callbackContext.success("WebView destroyed for id=" + id);
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "Error destroying WebView (id=" + id + "): " + e.getMessage());
+                    if (callbackContext != null) {
+                        callbackContext.error("Error destroying WebView: " + e.getMessage());
+                    }
+                }
+            } else {
+                if (callbackContext != null) {
+                    callbackContext.error("No WebView to destroy for id=" + id);
                 }
             }
         });
     }
 
-    private void canGoBack(final CallbackContext callbackContext) {
-        cordova.getActivity().runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                if (embeddedWebView != null) {
-                    boolean canGoBack = embeddedWebView.canGoBack();
-                    callbackContext.success(canGoBack ? 1 : 0);
+    private void loadUrl(final String id,
+                         final String url,
+                         final JSONObject headers,
+                         final CallbackContext callbackContext) {
+
+        cordova.getActivity().runOnUiThread(() -> {
+            WebViewInstance instance = getInstance(id, callbackContext);
+            if (instance == null) return;
+
+            try {
+                if (headers != null && headers.length() > 0) {
+                    Map<String, String> headerMap = jsonToMap(headers);
+                    instance.webView.loadUrl(url, headerMap);
                 } else {
-                    callbackContext.error("WebView not initialized");
+                    instance.webView.loadUrl(url);
+                }
+                if (callbackContext != null) {
+                    callbackContext.success("URL loaded: " + url);
+                }
+            } catch (Exception e) {
+                if (callbackContext != null) {
+                    callbackContext.error("Error loading URL: " + e.getMessage());
                 }
             }
         });
     }
 
-    private void goForward(final CallbackContext callbackContext) {
-        cordova.getActivity().runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                if (embeddedWebView != null) {
-                    if (embeddedWebView.canGoForward()) {
-                        embeddedWebView.goForward();
-                        embeddedWebView.postDelayed(() -> updateNavigationState(), 100);
-                        callbackContext.success("Navigated forward");
-                    } else {
-                        callbackContext.error("Cannot go forward");
+    private void executeScript(final String id,
+                               final String script,
+                               final CallbackContext callbackContext) {
+
+        cordova.getActivity().runOnUiThread(() -> {
+            WebViewInstance instance = getInstance(id, callbackContext);
+            if (instance == null) return;
+
+            instance.webView.evaluateJavascript(script, new ValueCallback<String>() {
+                @Override
+                public void onReceiveValue(String result) {
+                    if (callbackContext != null) {
+                        callbackContext.success(result);
                     }
-                } else {
-                    callbackContext.error("WebView not initialized");
+                }
+            });
+        });
+    }
+
+    private void setVisible(final String id,
+                            final boolean visible,
+                            final CallbackContext callbackContext) {
+
+        cordova.getActivity().runOnUiThread(() -> {
+            WebViewInstance instance = getInstance(id, callbackContext);
+            if (instance == null) return;
+
+            if (instance.container != null) {
+                instance.container.setVisibility(visible ? View.VISIBLE : View.GONE);
+            } else if (instance.webView != null) {
+                instance.webView.setVisibility(visible ? View.VISIBLE : View.GONE);
+            }
+
+            if (callbackContext != null) {
+                callbackContext.success("Visibility changed to: " + visible + " for id=" + id);
+            }
+        });
+    }
+
+    private void reload(final String id, final CallbackContext callbackContext) {
+        cordova.getActivity().runOnUiThread(() -> {
+            WebViewInstance instance = getInstance(id, callbackContext);
+            if (instance == null) return;
+
+            instance.webView.reload();
+            if (callbackContext != null) {
+                callbackContext.success("WebView reloaded for id=" + id);
+            }
+        });
+    }
+
+    private void goBack(final String id, final CallbackContext callbackContext) {
+        cordova.getActivity().runOnUiThread(() -> {
+            WebViewInstance instance = getInstance(id, callbackContext);
+            if (instance == null) return;
+
+            if (instance.webView.canGoBack()) {
+                instance.webView.goBack();
+                instance.webView.postDelayed(() -> updateNavigationState(id), 100);
+                if (callbackContext != null) {
+                    callbackContext.success("Navigated back for id=" + id);
+                }
+            } else {
+                if (callbackContext != null) {
+                    callbackContext.error("Cannot go back for id=" + id);
+                }
+            }
+        });
+    }
+
+    private void canGoBack(final String id, final CallbackContext callbackContext) {
+        cordova.getActivity().runOnUiThread(() -> {
+            WebViewInstance instance = getInstance(id, callbackContext);
+            if (instance == null) return;
+
+            boolean canGoBack = instance.webView.canGoBack();
+            if (callbackContext != null) {
+                callbackContext.success(canGoBack ? 1 : 0);
+            }
+        });
+    }
+
+    private void goForward(final String id, final CallbackContext callbackContext) {
+        cordova.getActivity().runOnUiThread(() -> {
+            WebViewInstance instance = getInstance(id, callbackContext);
+            if (instance == null) return;
+
+            if (instance.webView.canGoForward()) {
+                instance.webView.goForward();
+                instance.webView.postDelayed(() -> updateNavigationState(id), 100);
+                if (callbackContext != null) {
+                    callbackContext.success("Navigated forward for id=" + id);
+                }
+            } else {
+                if (callbackContext != null) {
+                    callbackContext.error("Cannot go forward for id=" + id);
                 }
             }
         });
@@ -546,49 +642,47 @@ public class EmbeddedWebView extends CordovaPlugin {
         return map;
     }
 
-    private void updateNavigationState() {
-        cordova.getActivity().runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                if (embeddedWebView != null) {
-                    boolean newCanGoBack = embeddedWebView.canGoBack();
-                    boolean newCanGoForward = embeddedWebView.canGoForward();
-
-                    if (newCanGoBack != canGoBack) {
-                        canGoBack = newCanGoBack;
-                        fireEvent("canGoBackChanged", String.valueOf(canGoBack));
-                    }
-
-                    if (newCanGoForward != canGoForward) {
-                        canGoForward = newCanGoForward;
-                        fireEvent("canGoForwardChanged", String.valueOf(canGoForward));
-                    }
-
-                    String navigationState = "{\"canGoBack\":" + canGoBack + ",\"canGoForward\":" + canGoForward + "}";
-                    fireEvent("navigationStateChanged", navigationState);
-                }
+    private void updateNavigationState(final String id) {
+        cordova.getActivity().runOnUiThread(() -> {
+            WebViewInstance instance = instances.get(id);
+            if (instance == null || instance.webView == null) {
+                return;
             }
+
+            boolean newCanGoBack = instance.webView.canGoBack();
+            boolean newCanGoForward = instance.webView.canGoForward();
+
+            if (newCanGoBack != instance.canGoBack) {
+                instance.canGoBack = newCanGoBack;
+                fireEvent("canGoBackChanged", String.valueOf(instance.canGoBack));
+            }
+
+            if (newCanGoForward != instance.canGoForward) {
+                instance.canGoForward = newCanGoForward;
+                fireEvent("canGoForwardChanged", String.valueOf(instance.canGoForward));
+            }
+
+            String navigationState = "{\"canGoBack\":" + instance.canGoBack +
+                    ",\"canGoForward\":" + instance.canGoForward + "}";
+            fireEvent("navigationStateChanged", navigationState);
         });
     }
 
     private void fireEvent(String eventName, String data) {
         try {
             String js = "javascript:cordova.fireDocumentEvent('embeddedwebview." + eventName + "', " +
-                    "{detail: " + (data.startsWith("{") ? data : "'" + data + "'") + "});";
+                    "{detail: " + (data != null && data.startsWith("{") ? data : "'" + data + "'") + "});";
 
             Log.d(TAG, "Firing event: " + eventName + " with data: " + data);
 
-            cordova.getActivity().runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    cordovaWebView.getView().post(() -> {
-                        try {
-                            cordovaWebView.loadUrl(js);
-                        } catch (Exception e) {
-                            Log.e(TAG, "Error firing event: " + e.getMessage());
-                        }
-                    });
-                }
+            cordova.getActivity().runOnUiThread(() -> {
+                cordovaWebView.getView().post(() -> {
+                    try {
+                        cordovaWebView.loadUrl(js);
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error firing event: " + e.getMessage());
+                    }
+                });
             });
         } catch (Exception e) {
             Log.e(TAG, "Error firing event: " + e.getMessage());
@@ -597,21 +691,19 @@ public class EmbeddedWebView extends CordovaPlugin {
 
     @Override
     public void onDestroy() {
-        if (embeddedWebView != null) {
-            embeddedWebView.destroy();
-            embeddedWebView = null;
+        for (String id : new HashMap<>(instances).keySet()) {
+            destroy(id, null);
         }
-        progressBar = null;
+        instances.clear();
         super.onDestroy();
     }
 
     @Override
     public void onReset() {
-        if (embeddedWebView != null) {
-            embeddedWebView.destroy();
-            embeddedWebView = null;
+        for (String id : new HashMap<>(instances).keySet()) {
+            destroy(id, null);
         }
-        progressBar = null;
+        instances.clear();
         super.onReset();
     }
 }

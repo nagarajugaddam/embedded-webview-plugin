@@ -2,27 +2,29 @@ let exec = require('cordova/exec');
 
 let EmbeddedWebView = {
     /**
-     * Create and show an embedded WebView
+     * Create and show an embedded WebView instance
+     * @param {string} id - Unique instance id for this WebView (e.g. 'classroom', 'payment')
      * @param {string} url - URL to load
      * @param {object} options - Layout and configuration options
      * @param {number} options.top - Top offset in pixels (distance from top of screen)
      * @param {number} options.height - Height in pixels (visible area for the WebView)
      * @param {object} [options.headers] - Optional custom HTTP headers
-     * @param {object} [options.progressColor] - Optional progress bar color
-     * @param {object} [options.progressHeight] - Optional progress bar height
+     * @param {string} [options.progressColor] - Optional progress bar color
+     * @param {number} [options.progressHeight] - Optional progress bar height
      * @param {boolean} [options.enableZoom=false] - Enable zoom controls
      * @param {boolean} [options.clearCache=false] - Clear cache before loading
      * @param {string} [options.userAgent] - Custom User-Agent string
      * @param {function} [successCallback]
      * @param {function} [errorCallback]
-     * 
+     *
      * @example
      * const nav = document.querySelector('.navbar');
      * const bottom = document.querySelector('.bottom-bar');
      * const topOffset = nav.offsetHeight;
      * const availableHeight = window.innerHeight - (nav.offsetHeight + bottom.offsetHeight);
-     * 
-     * EmbeddedWebView.create('https://example.com', {
+     *
+     * // 'classroom' is the instance id
+     * EmbeddedWebView.create('classroom', 'https://example.com', {
      *     top: topOffset,
      *     height: availableHeight,
      *     headers: { Authorization: 'Bearer token123' },
@@ -30,10 +32,15 @@ let EmbeddedWebView = {
      *     progressHeight: 5,
      * }, msg => console.log('Success:', msg), err => console.error('Error:', err));
      */
-    create: function (url, options, successCallback, errorCallback) {
+    create: function (id, url, options, successCallback, errorCallback) {
         options = options || {};
 
         // Validations
+        if (!id || typeof id !== 'string') {
+            errorCallback && errorCallback('id must be a non-empty string');
+            return;
+        }
+
         if (!url || typeof url !== 'string') {
             errorCallback && errorCallback('URL must be a non-empty string');
             return;
@@ -52,111 +59,185 @@ let EmbeddedWebView = {
             errorCallback,
             'EmbeddedWebView',
             'create',
-            [url, options]
+            [id, url, options]
         );
     },
 
-    /** Destroy the embedded WebView */
-    destroy: function (successCallback, errorCallback) {
-        exec(successCallback, errorCallback, 'EmbeddedWebView', 'destroy', []);
+    /**
+     * Destroy a specific embedded WebView instance
+     * @param {string} id
+     */
+    destroy: function (id, successCallback, errorCallback) {
+        if (!id || typeof id !== 'string') {
+            errorCallback && errorCallback('id must be a non-empty string');
+            return;
+        }
+
+        exec(successCallback, errorCallback, 'EmbeddedWebView', 'destroy', [id]);
     },
 
-    /** Navigate to a new URL in the WebView */
-    loadUrl: function (url, headers, successCallback, errorCallback) {
+    /**
+     * Navigate to a new URL in a specific WebView instance
+     * @param {string} id
+     * @param {string} url
+     * @param {object|function} [headers]
+     */
+    loadUrl: function (id, url, headers, successCallback, errorCallback) {
+        if (!id || typeof id !== 'string') {
+            errorCallback && errorCallback('id must be a non-empty string');
+            return;
+        }
+
+        if (!url || typeof url !== 'string') {
+            errorCallback && errorCallback('URL must be a non-empty string');
+            return;
+        }
+
         if (typeof headers === 'function') {
             errorCallback = successCallback;
             successCallback = headers;
             headers = null;
         }
 
-        exec(successCallback, errorCallback, 'EmbeddedWebView', 'loadUrl', [url, headers]);
+        exec(
+            successCallback,
+            errorCallback,
+            'EmbeddedWebView',
+            'loadUrl',
+            [id, url, headers || null]
+        );
     },
 
-    /** Execute JavaScript in the embedded WebView */
-    executeScript: function (script, successCallback, errorCallback) {
+    /**
+     * Execute JavaScript in a specific embedded WebView instance
+     * @param {string} id
+     * @param {string} script
+     */
+    executeScript: function (id, script, successCallback, errorCallback) {
+        if (!id || typeof id !== 'string') {
+            errorCallback && errorCallback('id must be a non-empty string');
+            return;
+        }
+
         if (!script || typeof script !== 'string') {
             errorCallback && errorCallback('script must be a non-empty string');
             return;
         }
 
-        exec(successCallback, errorCallback, 'EmbeddedWebView', 'executeScript', [script]);
+        exec(
+            successCallback,
+            errorCallback,
+            'EmbeddedWebView',
+            'executeScript',
+            [id, script]
+        );
     },
 
-    /** Show or hide the WebView */
-    setVisible: function (visible, successCallback, errorCallback) {
-        exec(successCallback, errorCallback, 'EmbeddedWebView', 'setVisible', [!!visible]);
+    /**
+     * Show or hide a specific WebView instance
+     * @param {string} id
+     * @param {boolean} visible
+     */
+    setVisible: function (id, visible, successCallback, errorCallback) {
+        if (!id || typeof id !== 'string') {
+            errorCallback && errorCallback('id must be a non-empty string');
+            return;
+        }
+
+        exec(
+            successCallback,
+            errorCallback,
+            'EmbeddedWebView',
+            'setVisible',
+            [id, !!visible]
+        );
     },
 
-    /** Reload the WebView */
-    reload: function (successCallback, errorCallback) {
-        exec(successCallback, errorCallback, 'EmbeddedWebView', 'reload', []);
+    /**
+     * Reload a specific WebView instance
+     * @param {string} id
+     */
+    reload: function (id, successCallback, errorCallback) {
+        if (!id || typeof id !== 'string') {
+            errorCallback && errorCallback('id must be a non-empty string');
+            return;
+        }
+
+        exec(successCallback, errorCallback, 'EmbeddedWebView', 'reload', [id]);
     },
 
-    /** Go back in history */
-    goBack: function (successCallback, errorCallback) {
-        exec(successCallback, errorCallback, 'EmbeddedWebView', 'goBack', []);
+    /**
+     * Go back in history for a specific WebView instance
+     * @param {string} id
+     */
+    goBack: function (id, successCallback, errorCallback) {
+        if (!id || typeof id !== 'string') {
+            errorCallback && errorCallback('id must be a non-empty string');
+            return;
+        }
+
+        exec(successCallback, errorCallback, 'EmbeddedWebView', 'goBack', [id]);
     },
 
-    /** Go forward in history */
-    goForward: function (successCallback, errorCallback) {
-        exec(successCallback, errorCallback, 'EmbeddedWebView', 'goForward', []);
+    /**
+     * Go forward in history for a specific WebView instance
+     * @param {string} id
+     */
+    goForward: function (id, successCallback, errorCallback) {
+        if (!id || typeof id !== 'string') {
+            errorCallback && errorCallback('id must be a non-empty string');
+            return;
+        }
+
+        exec(successCallback, errorCallback, 'EmbeddedWebView', 'goForward', [id]);
     },
 
-    /** Helper: Inject authentication token */
-    injectAuthToken: function (token, storageType, key, successCallback, errorCallback) {
+    /**
+     * Optional: ask native if this instance can go back
+     * (matches the `canGoBack` action in the Android plugin)
+     * @param {string} id
+     */
+    canGoBack: function (id, successCallback, errorCallback) {
+        if (!id || typeof id !== 'string') {
+            errorCallback && errorCallback('id must be a non-empty string');
+            return;
+        }
+
+        exec(successCallback, errorCallback, 'EmbeddedWebView', 'canGoBack', [id]);
+    },
+
+    /** Helper: Inject authentication token into a specific instance */
+    injectAuthToken: function (id, token, storageType, key, successCallback, errorCallback) {
+        if (!id || typeof id !== 'string') {
+            errorCallback && errorCallback('id must be a non-empty string');
+            return;
+        }
+
         storageType = storageType || 'localStorage';
         key = key || 'authToken';
         let script = `${storageType}.setItem('${key}', '${token}');`;
-        this.executeScript(script, successCallback, errorCallback);
+        this.executeScript(id, script, successCallback, errorCallback);
     },
 
-    /** Helper: Get a storage value */
-    getStorageValue: function (key, storageType, successCallback, errorCallback) {
+    /** Helper: Get a storage value from a specific instance */
+    getStorageValue: function (id, key, storageType, successCallback, errorCallback) {
+        if (!id || typeof id !== 'string') {
+            errorCallback && errorCallback('id must be a non-empty string');
+            return;
+        }
+
         storageType = storageType || 'localStorage';
         let script = `${storageType}.getItem('${key}');`;
-        this.executeScript(script, successCallback, errorCallback);
+        this.executeScript(id, script, successCallback, errorCallback);
     },
 
     /**
      * Add event listener for WebView events
+     * NOTE: events are still global at the document level.
+     * If you want per-instance info, include `id` in the payload on the native side.
+     *
      * @param {string} eventName - Event name (loadStart, loadStop, loadError, navigationStateChanged, canGoBackChanged, canGoForwardChanged)
      * @param {function} callback - Callback function
-     * 
-     * @example
-     * // Listen for navigation state changes
-     * EmbeddedWebView.addEventListener('navigationStateChanged', function(event) {
-     *     console.log('Can go back:', event.detail.canGoBack);
-     *     console.log('Can go forward:', event.detail.canGoForward);
-     * });
-     * 
-     * // Listen when page starts loading
-     * EmbeddedWebView.addEventListener('loadStart', function(event) {
-     *     console.log('Started loading:', event.detail);
-     * });
-     * 
-     * // Listen when page finishes loading
-     * EmbeddedWebView.addEventListener('loadStop', function(event) {
-     *     console.log('Finished loading:', event.detail);
-     * });
-     * 
-     * // Listen for load errors
-     * EmbeddedWebView.addEventListener('loadError', function(event) {
-     *     console.error('Error loading:', event.detail);
-     * });
-     * 
-     * // Listen for back button availability changes
-     * EmbeddedWebView.addEventListener('canGoBackChanged', function(event) {
-     *     let canGoBack = event.detail === 'true';
-     *     console.log('Can go back:', canGoBack);
-     *     // Update UI button state
-     * });
-     * 
-     * // Listen for forward button availability changes
-     * EmbeddedWebView.addEventListener('canGoForwardChanged', function(event) {
-     *     let canGoForward = event.detail === 'true';
-     *     console.log('Can go forward:', canGoForward);
-     *     // Update UI button state
-     * });
      */
     addEventListener: function (eventName, callback) {
         if (typeof callback !== 'function') {
