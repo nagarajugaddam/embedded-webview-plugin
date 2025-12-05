@@ -18,5 +18,6 @@
 - (void)reload:(CDVInvokedUrlCommand*)command;
 - (void)goBack:(CDVInvokedUrlCommand*)command;
 - (void)goForward:(CDVInvokedUrlCommand*)command;
+- (void)canGoBack:(CDVInvokedUrlCommand*)command;
 
 @end

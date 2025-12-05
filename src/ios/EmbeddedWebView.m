@@ -1,6 +1,6 @@
 //
 //  EmbeddedWebView.m
-//  Cordova Plugin - EmbeddedWebView (multi-instance)
+//  Cordova Plugin - EmbeddedWebView (multi-instance, per-instance events)
 //
 
 #import "EmbeddedWebView.h"
@@ -29,6 +29,7 @@
     [super pluginInitialize];
     self.instances = [NSMutableDictionary dictionary];
     self.lastCreatedId = nil;
+    self.currentCallbackId = nil;
     NSLog(@"[EmbeddedWebView] Plugin initialized (multi-instance)");
 }
 
@@ -62,9 +63,6 @@
 #pragma mark - Create
 
 // JS: EmbeddedWebView.create(id, url, options, ...)
-// command.arguments[0] = id
-// command.arguments[1] = url
-// command.arguments[2] = options
 - (void)create:(CDVInvokedUrlCommand*)command {
     NSLog(@"[EmbeddedWebView] Creating WebView (multi-instance)");
 
@@ -501,7 +499,8 @@
         if ([instance.webView canGoBack]) {
             [instance.webView goBack];
 
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
                 [self updateNavigationStateForInstanceId:instanceId];
             });
 
@@ -536,7 +535,8 @@
         if ([instance.webView canGoForward]) {
             [instance.webView goForward];
 
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
                 [self updateNavigationStateForInstanceId:instanceId];
             });
 
@@ -548,6 +548,30 @@
                                                         messageAsString:@"Cannot go forward"];
             [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
         }
+    });
+}
+
+#pragma mark - canGoBack
+
+// JS: EmbeddedWebView.canGoBack(id, ...)
+- (void)canGoBack:(CDVInvokedUrlCommand*)command {
+    NSString *instanceId = [command argumentAtIndex:0];
+
+    if (!instanceId || instanceId.length == 0) {
+        CDVPluginResult *res = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+                                                 messageAsString:@"id must be a non-empty string"];
+        [self.commandDelegate sendPluginResult:res callbackId:command.callbackId];
+        return;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
+        if (!instance) return;
+
+        BOOL canGoBack = [instance.webView canGoBack];
+        CDVPluginResult *res = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
+                                                  messageAsBool:canGoBack];
+        [self.commandDelegate sendPluginResult:res callbackId:command.callbackId];
     });
 }
 
@@ -563,9 +587,12 @@
             [instance.progressBar setProgress:0.0 animated:NO];
         }
 
-        NSString *url = webView.URL.absoluteString;
+        NSString *url = webView.URL.absoluteString ?: @"";
         NSLog(@"[EmbeddedWebView] Page started loading (id=%@): %@", instanceId, url);
-        [self fireEvent:@"loadStart" withData:url];
+
+        if (instanceId) {
+            [self fireEvent:@"loadStart" forInstanceId:instanceId withData:url];
+        }
     });
 }
 
@@ -576,7 +603,8 @@
 
         if (instance && instance.progressBar) {
             [instance.progressBar setProgress:1.0 animated:YES];
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
                 instance.progressBar.hidden = YES;
             });
         }
@@ -600,13 +628,13 @@
         })();";
         [webView evaluateJavaScript:rewriteJS completionHandler:nil];
 
-        NSString *url = webView.URL.absoluteString;
+        NSString *url = webView.URL.absoluteString ?: @"";
         NSLog(@"[EmbeddedWebView] Page finished loading (id=%@): %@", instanceId, url);
 
         if (instanceId) {
             [self updateNavigationStateForInstanceId:instanceId];
+            [self fireEvent:@"loadStop" forInstanceId:instanceId withData:url];
         }
-        [self fireEvent:@"loadStop" withData:url];
     });
 }
 
@@ -614,24 +642,36 @@
 didFailProvisionalNavigation:(WKNavigation *)navigation
       withError:(NSError *)error {
 
-    NSString *url = webView.URL.absoluteString;
-    NSString *errorData = [NSString stringWithFormat:@"{\"url\":\"%@\",\"code\":%ld,\"message\":\"%@\"}",
-                           url, (long)error.code, error.localizedDescription];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *instanceId = [self instanceIdForWebView:webView];
+        NSString *url = webView.URL.absoluteString ?: @"";
+        NSString *errorData = [NSString stringWithFormat:@"{\"url\":\"%@\",\"code\":%ld,\"message\":\"%@\"}",
+                               url, (long)error.code, error.localizedDescription];
 
-    NSLog(@"[EmbeddedWebView] Error loading page: %@", error.localizedDescription);
-    [self fireEvent:@"loadError" withData:errorData];
+        NSLog(@"[EmbeddedWebView] Error loading page (id=%@): %@", instanceId, error.localizedDescription);
+
+        if (instanceId) {
+            [self fireEvent:@"loadError" forInstanceId:instanceId withData:errorData];
+        }
+    });
 }
 
 - (void)webView:(WKWebView *)webView
 didFailNavigation:(WKNavigation *)navigation
       withError:(NSError *)error {
 
-    NSString *url = webView.URL.absoluteString;
-    NSString *errorData = [NSString stringWithFormat:@"{\"url\":\"%@\",\"code\":%ld,\"message\":\"%@\"}",
-                           url, (long)error.code, error.localizedDescription];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *instanceId = [self instanceIdForWebView:webView];
+        NSString *url = webView.URL.absoluteString ?: @"";
+        NSString *errorData = [NSString stringWithFormat:@"{\"url\":\"%@\",\"code\":%ld,\"message\":\"%@\"}",
+                               url, (long)error.code, error.localizedDescription];
 
-    NSLog(@"[EmbeddedWebView] Navigation error: %@", error.localizedDescription);
-    [self fireEvent:@"loadError" withData:errorData];
+        NSLog(@"[EmbeddedWebView] Navigation error (id=%@): %@", instanceId, error.localizedDescription);
+
+        if (instanceId) {
+            [self fireEvent:@"loadError" forInstanceId:instanceId withData:errorData];
+        }
+    });
 }
 
 #pragma mark - WKNavigationDelegate (policy)
@@ -699,32 +739,56 @@ createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
 
     if (newCanGoBack != instance.canGoBack) {
         instance.canGoBack = newCanGoBack;
-        [self fireEvent:@"canGoBackChanged" withData:instance.canGoBack ? @"true" : @"false"];
+        [self fireEvent:@"canGoBackChanged"
+         forInstanceId:instanceId
+              withData:instance.canGoBack ? @"true" : @"false"];
     }
 
     if (newCanGoForward != instance.canGoForward) {
         instance.canGoForward = newCanGoForward;
-        [self fireEvent:@"canGoForwardChanged" withData:instance.canGoForward ? @"true" : @"false"];
+        [self fireEvent:@"canGoForwardChanged"
+         forInstanceId:instanceId
+              withData:instance.canGoForward ? @"true" : @"false"];
     }
 
     NSString *navigationState = [NSString stringWithFormat:@"{\"canGoBack\":%@,\"canGoForward\":%@}",
                                  instance.canGoBack ? @"true" : @"false",
                                  instance.canGoForward ? @"true" : @"false"];
-    [self fireEvent:@"navigationStateChanged" withData:navigationState];
+
+    [self fireEvent:@"navigationStateChanged"
+     forInstanceId:instanceId
+          withData:navigationState];
 }
 
-- (void)fireEvent:(NSString *)eventName withData:(NSString *)data {
+- (void)fireEvent:(NSString *)eventName
+   forInstanceId:(NSString *)instanceId
+        withData:(NSString *)data {
+
+    if (!instanceId || instanceId.length == 0) {
+        NSLog(@"[EmbeddedWebView] Skipping event %@ because instanceId is nil", eventName);
+        return;
+    }
+
     @try {
-        NSString *dataFormatted = data;
-        if (![data hasPrefix:@"{"]) {
-            dataFormatted = [NSString stringWithFormat:@"'%@'", data];
+        NSString *dataFormatted;
+
+        if (!data) {
+            dataFormatted = @"null";
+        } else if ([data hasPrefix:@"{"]) {
+            // JSON payload
+            dataFormatted = data;
+        } else {
+            // escape single quotes
+            NSString *escaped = [data stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
+            dataFormatted = [NSString stringWithFormat:@"'%@'", escaped];
         }
 
         NSString *js = [NSString stringWithFormat:
-                        @"cordova.fireDocumentEvent('embeddedwebview.%@', {detail: %@});",
-                        eventName, dataFormatted];
+                        @"cordova.fireDocumentEvent('embeddedwebview.%@.%@', {detail: %@});",
+                        instanceId, eventName, dataFormatted];
 
-        NSLog(@"[EmbeddedWebView] Firing event: %@ with data: %@", eventName, data);
+        NSLog(@"[EmbeddedWebView] Firing event %@ for id=%@ with data: %@",
+              eventName, instanceId, data);
 
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.commandDelegate evalJs:js];

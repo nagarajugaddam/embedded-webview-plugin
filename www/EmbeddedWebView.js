@@ -1,3 +1,5 @@
+// EmbeddedWebView.js (multi-instance, per-id events)
+
 let exec = require('cordova/exec');
 
 let EmbeddedWebView = {
@@ -16,21 +18,6 @@ let EmbeddedWebView = {
      * @param {string} [options.userAgent] - Custom User-Agent string
      * @param {function} [successCallback]
      * @param {function} [errorCallback]
-     *
-     * @example
-     * const nav = document.querySelector('.navbar');
-     * const bottom = document.querySelector('.bottom-bar');
-     * const topOffset = nav.offsetHeight;
-     * const availableHeight = window.innerHeight - (nav.offsetHeight + bottom.offsetHeight);
-     *
-     * // 'classroom' is the instance id
-     * EmbeddedWebView.create('classroom', 'https://example.com', {
-     *     top: topOffset,
-     *     height: availableHeight,
-     *     headers: { Authorization: 'Bearer token123' },
-     *     progressColor: '#2196F3',
-     *     progressHeight: 5,
-     * }, msg => console.log('Success:', msg), err => console.error('Error:', err));
      */
     create: function (id, url, options, successCallback, errorCallback) {
         options = options || {};
@@ -193,8 +180,7 @@ let EmbeddedWebView = {
     },
 
     /**
-     * Optional: ask native if this instance can go back
-     * (matches the `canGoBack` action in the Android plugin)
+     * Ask native if this instance can go back
      * @param {string} id
      */
     canGoBack: function (id, successCallback, errorCallback) {
@@ -206,7 +192,9 @@ let EmbeddedWebView = {
         exec(successCallback, errorCallback, 'EmbeddedWebView', 'canGoBack', [id]);
     },
 
-    /** Helper: Inject authentication token into a specific instance */
+    /**
+     * Helper: Inject authentication token into a specific instance (storage-safe)
+     */
     injectAuthToken: function (id, token, storageType, key, successCallback, errorCallback) {
         if (!id || typeof id !== 'string') {
             errorCallback && errorCallback('id must be a non-empty string');
@@ -215,11 +203,19 @@ let EmbeddedWebView = {
 
         storageType = storageType || 'localStorage';
         key = key || 'authToken';
-        let script = `${storageType}.setItem('${key}', '${token}');`;
+
+        const safeKey = String(key);
+        const safeToken = token == null ? '' : String(token);
+
+        const script =
+            `${storageType}.setItem(${JSON.stringify(safeKey)}, ${JSON.stringify(safeToken)});`;
+
         this.executeScript(id, script, successCallback, errorCallback);
     },
 
-    /** Helper: Get a storage value from a specific instance */
+    /**
+     * Helper: Get a storage value from a specific instance (storage-safe)
+     */
     getStorageValue: function (id, key, storageType, successCallback, errorCallback) {
         if (!id || typeof id !== 'string') {
             errorCallback && errorCallback('id must be a non-empty string');
@@ -227,35 +223,53 @@ let EmbeddedWebView = {
         }
 
         storageType = storageType || 'localStorage';
-        let script = `${storageType}.getItem('${key}');`;
+        const safeKey = String(key);
+
+        const script =
+            `${storageType}.getItem(${JSON.stringify(safeKey)});`;
+
         this.executeScript(id, script, successCallback, errorCallback);
     },
 
     /**
-     * Add event listener for WebView events
-     * NOTE: events are still global at the document level.
-     * If you want per-instance info, include `id` in the payload on the native side.
+     * Add event listener for WebView events for a specific instance.
      *
-     * @param {string} eventName - Event name (loadStart, loadStop, loadError, navigationStateChanged, canGoBackChanged, canGoForwardChanged)
-     * @param {function} callback - Callback function
+     * Native now fires:
+     *   cordova.fireDocumentEvent('embeddedwebview.<id>.<eventName>', { detail: ... });
+     *
+     * @param {string} id - WebView instance id
+     * @param {string} eventName - loadStart, loadStop, loadError,
+     *                             navigationStateChanged, canGoBackChanged, canGoForwardChanged
+     * @param {function} callback - (event) => {}
      */
-    addEventListener: function (eventName, callback) {
+    addEventListener: function (id, eventName, callback) {
         if (typeof callback !== 'function') {
             console.error('Callback must be a function');
             return;
         }
 
-        let eventFullName = 'embeddedwebview.' + eventName;
+        if (!id || typeof id !== 'string') {
+            console.error('id must be a non-empty string');
+            return;
+        }
+
+        let eventFullName = 'embeddedwebview.' + id + '.' + eventName;
         document.addEventListener(eventFullName, callback, false);
     },
 
     /**
-     * Remove event listener
-     * @param {string} eventName - Event name
-     * @param {function} callback - Callback function to remove
+     * Remove event listener for a specific instance
+     * @param {string} id
+     * @param {string} eventName
+     * @param {function} callback
      */
-    removeEventListener: function (eventName, callback) {
-        let eventFullName = 'embeddedwebview.' + eventName;
+    removeEventListener: function (id, eventName, callback) {
+        if (!id || typeof id !== 'string') {
+            console.error('id must be a non-empty string');
+            return;
+        }
+
+        let eventFullName = 'embeddedwebview.' + id + '.' + eventName;
         document.removeEventListener(eventFullName, callback, false);
     }
 };
