@@ -18,7 +18,13 @@ let EmbeddedWebView = {
      * @param {string} [options.userAgent] - Custom User-Agent string
      * @param {function} [successCallback]
      * @param {function} [errorCallback]
-     */
+        * @param {object} [options.cookies] - Cookies to set BEFORE loading the URL
+        *   Example:
+        *   {
+        *     sessionId: "abc123",
+        *     accessToken: "jwt-token"
+        *   }
+        */
     create: function (id, url, options, successCallback, errorCallback) {
         options = options || {};
 

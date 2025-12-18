@@ -233,7 +233,64 @@
                     }
                 }
 
-                [webView loadRequest:request];
+                NSURL *nsUrl = [NSURL URLWithString:url];
+                NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:nsUrl];
+
+                // Apply headers (keep existing behavior)
+                if (options[@"headers"]) {
+                    NSDictionary *headers = options[@"headers"];
+                    for (NSString *key in headers) {
+                        [request setValue:headers[key] forHTTPHeaderField:key];
+                    }
+                }
+
+                // --------------------
+                // COOKIE INJECTION (BEFORE LOAD)
+                // --------------------
+                NSDictionary *cookies = options[@"cookies"];
+                if (cookies && [cookies isKindOfClass:[NSDictionary class]] && cookies.count > 0) {
+
+                    WKHTTPCookieStore *cookieStore =
+                        WKWebsiteDataStore.defaultDataStore.httpCookieStore;
+
+                    NSString *domain = [self cookieDomainFromURL:url];
+                    BOOL isSecure = [url hasPrefix:@"https://"];
+
+                    dispatch_group_t cookieGroup = dispatch_group_create();
+
+                    for (NSString *name in cookies) {
+                        NSString *value = [cookies[name] description];
+
+                        NSMutableDictionary *properties = [NSMutableDictionary dictionary];
+                        properties[NSHTTPCookieName] = name;
+                        properties[NSHTTPCookieValue] = value;
+                        properties[NSHTTPCookieDomain] = domain;
+                        properties[NSHTTPCookiePath] = @"/";
+
+                        if (isSecure) {
+                            properties[NSHTTPCookieSecure] = @"TRUE";
+                        }
+
+                        NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:properties];
+
+                        if (cookie) {
+                            dispatch_group_enter(cookieGroup);
+                            [cookieStore setCookie:cookie completionHandler:^{
+                                NSLog(@"[EmbeddedWebView] Cookie set [%@] for domain %@", name, domain);
+                                dispatch_group_leave(cookieGroup);
+                            }];
+                        }
+                    }
+
+                    // Load only AFTER cookies are set
+                    dispatch_group_notify(cookieGroup, dispatch_get_main_queue(), ^{
+                        [webView loadRequest:request];
+                    });
+
+                } else {
+                    // No cookies → load immediately
+                    [webView loadRequest:request];
+                }
 
                 // Save instance
                 self.instances[instanceId] = instance;
@@ -702,6 +759,12 @@ createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
         });
     }
     return nil;
+}
+
+- (NSString *)cookieDomainFromURL:(NSString *)urlString {
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (!url) return nil;
+    return url.host;
 }
 
 #pragma mark - KVO
