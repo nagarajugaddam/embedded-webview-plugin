@@ -126,7 +126,6 @@
 
                 // Configure WKWebView
                 WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
-                config.websiteDataStore = WKWebsiteDataStore.defaultDataStore;
                 config.allowsInlineMediaPlayback = YES;
 
                 if (@available(iOS 10.0, *)) {
@@ -225,11 +224,8 @@
                     [progressBar.heightAnchor constraintEqualToConstant:progressHeightValue]
                 ]];
 
+                NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
 
-                NSURL *nsUrl = [NSURL URLWithString:url];
-                NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:nsUrl];
-
-                // Apply headers (keep existing behavior)
                 if (options[@"headers"]) {
                     NSDictionary *headers = options[@"headers"];
                     for (NSString *key in headers) {
@@ -237,47 +233,7 @@
                     }
                 }
 
-                // --------------------
-                // COOKIE INJECTION (BEFORE LOAD)
-                // --------------------
-                NSDictionary *cookies = options[@"cookies"];
-                if (cookies && [cookies isKindOfClass:[NSDictionary class]] && cookies.count > 0) {
-
-                    WKHTTPCookieStore *cookieStore =
-                        WKWebsiteDataStore.defaultDataStore.httpCookieStore;
-
-                    NSURL *originURL = [NSURL URLWithString:url];
-                    dispatch_group_t cookieGroup = dispatch_group_create();
-
-                    for (NSString *name in cookies) {
-                        NSString *value = [cookies[name] description];
-
-                        NSMutableDictionary *properties = [NSMutableDictionary dictionary];
-                        properties[NSHTTPCookieName] = name;
-                        properties[NSHTTPCookieValue] = value;
-                        properties[NSHTTPCookiePath] = @"/";
-                        properties[NSHTTPCookieOriginURL] = originURL;
-
-                        NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:properties];
-
-                        if (cookie) {
-                            dispatch_group_enter(cookieGroup);
-                            [cookieStore setCookie:cookie completionHandler:^{
-                                NSLog(@"[EmbeddedWebView] Cookie set [%@] for URL %@", name, url);
-                                dispatch_group_leave(cookieGroup);
-                            }];
-                        }
-                    }
-
-                    // Load only AFTER cookies are set
-                    dispatch_group_notify(cookieGroup, dispatch_get_main_queue(), ^{
-                        [webView loadRequest:request];
-                    });
-
-                } else {
-                    // No cookies → load immediately
-                    [webView loadRequest:request];
-                }
+                [webView loadRequest:request];
 
                 // Save instance
                 self.instances[instanceId] = instance;
@@ -653,6 +609,21 @@
             });
         }
 
+        NSDictionary *cookies = options[@"cookies"];
+        if (cookies && [cookies isKindOfClass:[NSDictionary class]]) {
+            for (NSString *name in cookies) {
+                NSString *value = [cookies[name] description];
+
+                NSString *js = [NSString stringWithFormat:
+                    @"document.cookie = '%@=%@; path=/';",
+                    name, value
+                ];
+
+                [webView evaluateJavaScript:js completionHandler:nil];
+                NSLog(@"[EmbeddedWebView] JS cookie injected: %@", name);
+            }
+        }
+
         // Smooth scrolling CSS
         NSString *css = @"html, body { scroll-behavior: smooth !important; -webkit-overflow-scrolling: touch; }";
         NSString *js = [NSString stringWithFormat:@"var style = document.createElement('style'); style.innerHTML = '%@'; document.head.appendChild(style);", css];
@@ -747,7 +718,6 @@ createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
     }
     return nil;
 }
-
 
 #pragma mark - KVO
 

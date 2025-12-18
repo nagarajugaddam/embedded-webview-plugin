@@ -27,8 +27,6 @@ import android.util.Log;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
-import android.webkit.CookieManager;
-import android.webkit.CookieSyncManager;
 
 public class EmbeddedWebView extends CordovaPlugin {
 
@@ -206,16 +204,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                 FrameLayout webViewContainer = new FrameLayout(cordova.getActivity());
                 WebView webView = new WebView(cordova.getActivity());
 
-                // --------------------
-                // ENABLE COOKIES
-                // --------------------
-                CookieManager cookieManager = CookieManager.getInstance();
-                cookieManager.setAcceptCookie(true);
-
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
-                    cookieManager.setAcceptThirdPartyCookies(webView, true);
-                }
-
                 WebSettings settings = webView.getSettings();
                 settings.setJavaScriptEnabled(true);
                 settings.setDomStorageEnabled(true);
@@ -303,6 +291,27 @@ public class EmbeddedWebView extends CordovaPlugin {
                                     progressBar.setVisibility(View.GONE);
                                 }
                             }, 200);
+                        }
+
+                        // JS COOKIE INJECTION (InAppBrowser-style)
+                        if (options.has("cookies")) {
+                            try {
+                                JSONObject cookies = options.getJSONObject("cookies");
+                                Iterator<String> keys = cookies.keys();
+
+                                while (keys.hasNext()) {
+                                    String name = keys.next();
+                                    String value = cookies.getString(name);
+
+                                    String js =
+                                        "document.cookie = '" + name + "=" + value + "; path=/';";
+
+                                    view.evaluateJavascript(js, null);
+                                    Log.d(TAG, "JS cookie injected: " + name);
+                                }
+                            } catch (Exception e) {
+                                Log.e(TAG, "JS cookie injection failed", e);
+                            }
                         }
 
                         String css = "html, body { scroll-behavior: smooth !important; }";
@@ -427,40 +436,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                 contentView.invalidate();
                 contentView.requestLayout();
 
-                // --------------------
-                // COOKIE INJECTION (BEFORE FIRST LOAD)
-                // --------------------
-                if (options.has("cookies")) {
-                    JSONObject cookies = options.getJSONObject("cookies");
-                    CookieManager cm = CookieManager.getInstance();
-
-                    String cookieDomain = getCookieDomain(url);
-
-                    Iterator<String> keys = cookies.keys();
-                    while (keys.hasNext()) {
-                        String name = keys.next();
-                        String value = cookies.getString(name);
-
-                        StringBuilder cookie = new StringBuilder();
-                        cookie.append(name).append("=").append(value);
-                        cookie.append("; Path=/");
-                        cookie.append("; SameSite=None");
-
-                        if (cookieDomain.startsWith("https://")) {
-                            cookie.append("; Secure");
-                        }
-
-                        cm.setCookie(cookieDomain, cookie.toString());
-
-                        Log.d(TAG, "Cookie set [" + name + "] for " + cookieDomain);
-                    }
-
-                    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.LOLLIPOP) {
-                        CookieSyncManager.getInstance().sync();
-                    }
-                }
-
-
                 if (options.has("headers")) {
                     JSONObject headersJson = options.getJSONObject("headers");
                     Map<String, String> headers = jsonToMap(headersJson);
@@ -489,15 +464,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                 }
             }
         });
-    }
-
-    private String getCookieDomain(String url) {
-        try {
-            java.net.URI uri = new java.net.URI(url);
-            return uri.getScheme() + "://" + uri.getHost();
-        } catch (Exception e) {
-            return url;
-        }
     }
 
     private void destroy(final String id, final CallbackContext callbackContext) {
