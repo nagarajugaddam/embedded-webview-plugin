@@ -279,6 +279,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                         }
                         Log.d(TAG, "Page started loading (id=" + id + "): " + url);
                         fireEvent(id, "loadStart", url);
+                        injectCookies(view, options);
                     }
 
                     @Override
@@ -293,26 +294,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                             }, 200);
                         }
 
-                        // JS COOKIE INJECTION (InAppBrowser-style)
-                        if (options.has("cookies")) {
-                            try {
-                                JSONObject cookies = options.getJSONObject("cookies");
-                                Iterator<String> keys = cookies.keys();
-
-                                while (keys.hasNext()) {
-                                    String name = keys.next();
-                                    String value = cookies.getString(name);
-
-                                    String js =
-                                        "document.cookie = '" + name + "=" + value + "; path=/';";
-
-                                    view.evaluateJavascript(js, null);
-                                    Log.d(TAG, "JS cookie injected: " + name);
-                                }
-                            } catch (Exception e) {
-                                Log.e(TAG, "JS cookie injection failed", e);
-                            }
-                        }
+                        injectCookies(view, options);
 
                         String css = "html, body { scroll-behavior: smooth !important; }";
                         String js = "let style = document.createElement('style');"
@@ -464,6 +446,31 @@ public class EmbeddedWebView extends CordovaPlugin {
                 }
             }
         });
+    }
+
+    private void injectCookies(View view, JSONObject options) {
+        // JS COOKIE INJECTION (InAppBrowser-style)
+        if (options.has("cookies")) {
+                            try {
+                                JSONObject cookies = options.getJSONObject("cookies");
+                                Iterator<String> keys = cookies.keys();
+
+                                while (keys.hasNext()) {
+                                    String name = keys.next();
+                                    String value = cookies.getString(name);
+
+                                    String safeValue = value.replace("'", "\\'");
+                                    String js =
+                                        "document.cookie = '" + name + "=" + safeValue + "; path=/';";
+
+                                    view.evaluateJavascript(js, null);
+                                    Log.d(TAG, "JS cookie injected: " + name);
+                                }
+                            } catch (Exception e) {
+                                Log.e(TAG, "JS cookie injection failed", e);
+                            }
+        }
+                        
     }
 
     private void destroy(final String id, final CallbackContext callbackContext) {
