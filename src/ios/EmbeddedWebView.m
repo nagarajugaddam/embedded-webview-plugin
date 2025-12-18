@@ -126,6 +126,7 @@
 
                 // Configure WKWebView
                 WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
+                config.websiteDataStore = WKWebsiteDataStore.defaultDataStore;
                 config.allowsInlineMediaPlayback = YES;
 
                 if (@available(iOS 10.0, *)) {
@@ -224,14 +225,6 @@
                     [progressBar.heightAnchor constraintEqualToConstant:progressHeightValue]
                 ]];
 
-                NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
-
-                if (options[@"headers"]) {
-                    NSDictionary *headers = options[@"headers"];
-                    for (NSString *key in headers) {
-                        [request setValue:headers[key] forHTTPHeaderField:key];
-                    }
-                }
 
                 NSURL *nsUrl = [NSURL URLWithString:url];
                 NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:nsUrl];
@@ -253,9 +246,7 @@
                     WKHTTPCookieStore *cookieStore =
                         WKWebsiteDataStore.defaultDataStore.httpCookieStore;
 
-                    NSString *domain = [self cookieDomainFromURL:url];
-                    BOOL isSecure = [url hasPrefix:@"https://"];
-
+                    NSURL *originURL = [NSURL URLWithString:url];
                     dispatch_group_t cookieGroup = dispatch_group_create();
 
                     for (NSString *name in cookies) {
@@ -264,19 +255,15 @@
                         NSMutableDictionary *properties = [NSMutableDictionary dictionary];
                         properties[NSHTTPCookieName] = name;
                         properties[NSHTTPCookieValue] = value;
-                        properties[NSHTTPCookieDomain] = domain;
                         properties[NSHTTPCookiePath] = @"/";
-
-                        if (isSecure) {
-                            properties[NSHTTPCookieSecure] = @"TRUE";
-                        }
+                        properties[NSHTTPCookieOriginURL] = originURL;
 
                         NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:properties];
 
                         if (cookie) {
                             dispatch_group_enter(cookieGroup);
                             [cookieStore setCookie:cookie completionHandler:^{
-                                NSLog(@"[EmbeddedWebView] Cookie set [%@] for domain %@", name, domain);
+                                NSLog(@"[EmbeddedWebView] Cookie set [%@] for URL %@", name, url);
                                 dispatch_group_leave(cookieGroup);
                             }];
                         }
@@ -761,11 +748,6 @@ createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
     return nil;
 }
 
-- (NSString *)cookieDomainFromURL:(NSString *)urlString {
-    NSURL *url = [NSURL URLWithString:urlString];
-    if (!url) return nil;
-    return url.host;
-}
 
 #pragma mark - KVO
 
