@@ -448,29 +448,27 @@ public class EmbeddedWebView extends CordovaPlugin {
         });
     }
 
-    private void injectCookies(View view, JSONObject options) {
-        // JS COOKIE INJECTION (InAppBrowser-style)
+    private void injectCookies(WebView webView, JSONObject options) {
         if (options.has("cookies")) {
-                            try {
-                                JSONObject cookies = options.getJSONObject("cookies");
-                                Iterator<String> keys = cookies.keys();
+            try {
+                JSONObject cookies = options.getJSONObject("cookies");
+                Iterator<String> keys = cookies.keys();
 
-                                while (keys.hasNext()) {
-                                    String name = keys.next();
-                                    String value = cookies.getString(name);
+                while (keys.hasNext()) {
+                    String name = keys.next();
+                    String value = cookies.getString(name);
 
-                                    String safeValue = value.replace("'", "\\'");
-                                    String js =
-                                        "document.cookie = '" + name + "=" + safeValue + "; path=/';";
+                    String safeValue = value.replace("'", "\\'");
+                    String js =
+                        "document.cookie = '" + name + "=" + safeValue + "; path=/';";
 
-                                    view.evaluateJavascript(js, null);
-                                    Log.d(TAG, "JS cookie injected: " + name);
-                                }
-                            } catch (Exception e) {
-                                Log.e(TAG, "JS cookie injection failed", e);
-                            }
+                    webView.evaluateJavascript(js, null);
+                    Log.d(TAG, "JS cookie injected: " + name);
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "JS cookie injection failed", e);
+            }
         }
-                        
     }
 
     private void destroy(final String id, final CallbackContext callbackContext) {
