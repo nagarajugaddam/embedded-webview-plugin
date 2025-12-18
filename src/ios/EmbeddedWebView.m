@@ -16,6 +16,8 @@
 @property (nonatomic, strong) UIView *container;
 @property (nonatomic, assign) BOOL canGoBack;
 @property (nonatomic, assign) BOOL canGoForward;
+@property (nonatomic, strong) NSDictionary *cookies;
+
 @end
 
 @implementation EmbeddedWebViewInstance
@@ -66,9 +68,18 @@
 - (void)create:(CDVInvokedUrlCommand*)command {
     NSLog(@"[EmbeddedWebView] Creating WebView (multi-instance)");
 
+
     NSString *instanceId = [command argumentAtIndex:0];
     NSString *url = [command argumentAtIndex:1];
     NSDictionary *options = [command argumentAtIndex:2 withDefault:@{}];
+
+    EmbeddedWebViewInstance *instance = [[EmbeddedWebViewInstance alloc] init];
+    instance.canGoBack = NO;
+    instance.canGoForward = NO;
+
+    if ([options[@"cookies"] isKindOfClass:[NSDictionary class]]) {
+        instance.cookies = options[@"cookies"];
+    }
 
     if (!instanceId || instanceId.length == 0) {
         CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
@@ -93,6 +104,8 @@
     [self.commandDelegate runInBackground:^{
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
+
+
                 NSNumber *topOffset = options[@"top"] ?: @0;
                 NSNumber *bottomOffset = options[@"bottom"] ?: @0;
 
@@ -117,9 +130,6 @@
 
                 NSLog(@"[EmbeddedWebView] Final margins - Top: %.0fpx, Bottom: %.0fpx", finalTopMargin, finalBottomMargin);
 
-                EmbeddedWebViewInstance *instance = [[EmbeddedWebViewInstance alloc] init];
-                instance.canGoBack = NO;
-                instance.canGoForward = NO;
 
                 instance.container = [[UIView alloc] init];
                 instance.container.backgroundColor = [UIColor clearColor];
@@ -598,7 +608,9 @@
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     dispatch_async(dispatch_get_main_queue(), ^{
+
         NSString *instanceId = [self instanceIdForWebView:webView];
+
         EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
 
         if (instance && instance.progressBar) {
@@ -609,18 +621,16 @@
             });
         }
 
-        NSDictionary *cookies = options[@"cookies"];
-        if (cookies && [cookies isKindOfClass:[NSDictionary class]]) {
-            for (NSString *name in cookies) {
-                NSString *value = [cookies[name] description];
+        if (instance.cookies.count > 0) {
+            for (NSString *name in instance.cookies) {
+                NSString *val = [[instance.cookies[name] description]
+                    stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
 
-                NSString *js = [NSString stringWithFormat:
-                    @"document.cookie = '%@=%@; path=/';",
-                    name, value
-                ];
+                NSString *js =
+                    [NSString stringWithFormat:@"document.cookie='%@=%@; path=/';",
+                    name, val];
 
                 [webView evaluateJavaScript:js completionHandler:nil];
-                NSLog(@"[EmbeddedWebView] JS cookie injected: %@", name);
             }
         }
 
