@@ -27,6 +27,8 @@ import android.util.Log;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
+import android.graphics.Bitmap;
+import android.view.Gravity;
 
 public class EmbeddedWebView extends CordovaPlugin {
 
