@@ -62,31 +62,6 @@
     return nil;
 }
 
-- (UIWindow *)currentWindow {
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive &&
-                [scene isKindOfClass:[UIWindowScene class]]) {
-
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                for (UIWindow *window in windowScene.windows) {
-                    if (window.isKeyWindow) {
-                        return window;
-                    }
-                }
-            }
-        }
-        return nil;
-    } else {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        return UIApplication.sharedApplication.keyWindow;
-#pragma clang diagnostic pop
-    }
-}
-
-
-
 #pragma mark - Create
 
 // JS: EmbeddedWebView.create(id, url, options, ...)
@@ -126,6 +101,7 @@
         [self destroyInstanceWithId:instanceId sendCallback:NO callbackId:nil];
     }
 
+    [self.commandDelegate runInBackground:^{
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
 
@@ -140,9 +116,7 @@
                 CGFloat safeBottom = 0;
 
                 if (@available(iOS 11.0, *)) {
-                    // UIWindow *window = UIApplication.sharedApplication.keyWindow;
-                    UIWindow *window = [self currentWindow];
-
+                    UIWindow *window = UIApplication.sharedApplication.keyWindow;
                     if (window) {
                         safeTop = window.safeAreaInsets.top;
                         safeBottom = window.safeAreaInsets.bottom;
@@ -162,7 +136,6 @@
 
                 // Configure WKWebView
                 WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
-                config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
                 config.allowsInlineMediaPlayback = YES;
 
                 if (@available(iOS 10.0, *)) {
@@ -230,20 +203,9 @@
                 [instance.container addSubview:webView];
                 [instance.container addSubview:progressBar];
 
-                UIWindow *window = [self currentWindow];
-                UIView *mainView = self.webView.superview ?: window;
-
+                UIView *mainView = self.webView.superview ?: [UIApplication sharedApplication].keyWindow;
                 if (!mainView) {
                     mainView = self.webView;
-                }
-
-                if (!mainView) {
-                    CDVPluginResult *result =
-                        [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
-                                        messageAsString:@"No active window found"];
-                    [self.commandDelegate sendPluginResult:result
-                                                callbackId:command.callbackId];
-                    return;
                 }
                 [mainView addSubview:instance.container];
 
@@ -281,14 +243,7 @@
                     }
                 }
 
-               NSURL *requestURL = [NSURL URLWithString:url];
-
-                [self applyCookies:instance.cookies
-                            forURL:requestURL
-                    configuration:config
-                        completion:^{
-                            [webView loadRequest:request];
-                        }];
+                [webView loadRequest:request];
 
                 // Save instance
                 self.instances[instanceId] = instance;
@@ -307,70 +262,8 @@
                 [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
             }
         });
+    }];
 }
-
-- (void)applyCookies:(NSDictionary *)cookies
-              forURL:(NSURL *)url
-       configuration:(WKWebViewConfiguration *)config
-           completion:(void (^)(void))completion {
-
-    if (!cookies || cookies.count == 0) {
-        completion();
-        return;
-    }
-
-    NSString *domain = url.host;
-    if (!domain || domain.length == 0) {
-        NSLog(@"[EmbeddedWebView] Cookie injection skipped: invalid domain");
-        completion();
-        return;
-    }
-
-    WKHTTPCookieStore *cookieStore = config.websiteDataStore.httpCookieStore;
-    dispatch_group_t group = dispatch_group_create();
-
-    BOOL isSecure = [url.scheme.lowercaseString isEqualToString:@"https"];
-    BOOL isIPAddress = [[NSPredicate predicateWithFormat:
-        @"SELF MATCHES %@", @"^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$"]
-        evaluateWithObject:domain];
-
-    if (!isIPAddress && ![domain hasPrefix:@"."]) {
-        domain = [@"." stringByAppendingString:domain];
-    }
-
-    for (NSString *name in cookies) {
-        NSString *value = [cookies[name] description];
-        dispatch_group_enter(group);
-
-        NSMutableDictionary *props = @{
-        NSHTTPCookieName: name,
-        NSHTTPCookieValue: value,
-        NSHTTPCookieDomain: domain,
-        NSHTTPCookiePath: @"/"
-    }.mutableCopy;
-
-if (@available(iOS 13.0, *)) {
-    props[NSHTTPCookieSameSitePolicy] = NSHTTPCookieSameSiteNone;
-}
-
-        if (isSecure) {
-            props[NSHTTPCookieSecure] = @"TRUE";
-        }
-
-        NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:props];
-
-        [cookieStore setCookie:cookie completionHandler:^{
-            dispatch_group_leave(group);
-        }];
-    }
-
-    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
-        NSLog(@"[EmbeddedWebView] Cookies injected");
-        completion();
-    });
-}
-
-
 
 #pragma mark - Destroy
 
@@ -728,7 +621,18 @@ if (@available(iOS 13.0, *)) {
             });
         }
 
-       
+        if (instance.cookies.count > 0) {
+            for (NSString *name in instance.cookies) {
+                NSString *val = [[instance.cookies[name] description]
+                    stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
+
+                NSString *js =
+                    [NSString stringWithFormat:@"document.cookie='%@=%@; path=/';",
+                    name, val];
+
+                [webView evaluateJavaScript:js completionHandler:nil];
+            }
+        }
 
         // Smooth scrolling CSS
         NSString *css = @"html, body { scroll-behavior: smooth !important; -webkit-overflow-scrolling: touch; }";
