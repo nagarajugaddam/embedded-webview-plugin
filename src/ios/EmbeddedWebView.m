@@ -62,6 +62,31 @@
     return nil;
 }
 
+- (UIWindow *)currentWindow {
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive &&
+                [scene isKindOfClass:[UIWindowScene class]]) {
+
+                UIWindowScene *windowScene = (UIWindowScene *)scene;
+                for (UIWindow *window in windowScene.windows) {
+                    if (window.isKeyWindow) {
+                        return window;
+                    }
+                }
+            }
+        }
+        return nil;
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        return UIApplication.sharedApplication.keyWindow;
+#pragma clang diagnostic pop
+    }
+}
+
+
+
 #pragma mark - Create
 
 // JS: EmbeddedWebView.create(id, url, options, ...)
@@ -101,7 +126,6 @@
         [self destroyInstanceWithId:instanceId sendCallback:NO callbackId:nil];
     }
 
-    [self.commandDelegate runInBackground:^{
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
 
@@ -116,7 +140,9 @@
                 CGFloat safeBottom = 0;
 
                 if (@available(iOS 11.0, *)) {
-                    UIWindow *window = UIApplication.sharedApplication.keyWindow;
+                    // UIWindow *window = UIApplication.sharedApplication.keyWindow;
+                    UIWindow *window = [self currentWindow];
+
                     if (window) {
                         safeTop = window.safeAreaInsets.top;
                         safeBottom = window.safeAreaInsets.bottom;
@@ -204,9 +230,20 @@
                 [instance.container addSubview:webView];
                 [instance.container addSubview:progressBar];
 
-                UIView *mainView = self.webView.superview ?: [UIApplication sharedApplication].keyWindow;
+                UIWindow *window = [self currentWindow];
+                UIView *mainView = self.webView.superview ?: window;
+
                 if (!mainView) {
                     mainView = self.webView;
+                }
+
+                if (!mainView) {
+                    CDVPluginResult *result =
+                        [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+                                        messageAsString:@"No active window found"];
+                    [self.commandDelegate sendPluginResult:result
+                                                callbackId:command.callbackId];
+                    return;
                 }
                 [mainView addSubview:instance.container];
 
@@ -270,7 +307,6 @@
                 [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
             }
         });
-    }];
 }
 
 - (void)applyCookies:(NSDictionary *)cookies
