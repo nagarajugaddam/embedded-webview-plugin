@@ -189,31 +189,7 @@ public class EmbeddedWebView extends CordovaPlugin {
             }
             ViewGroup contentView = (ViewGroup) parent;
 
-            // ----------------------------
-            // Determine available screen height
-            // ----------------------------
-            View rootView = cordovaWebView.getView().getRootView();
-            int screenHeight = rootView.getHeight();
-
-            if (screenHeight <= 0) {
-                screenHeight = contentView.getHeight();
-            }
-
-            if (screenHeight <= 0) {
-                throw new IllegalStateException("Unable to determine screen height");
-            }
-
-            int calculatedHeight = screenHeight - topOffset - bottomOffset;
-
-            if (calculatedHeight <= 0) {
-                throw new IllegalStateException(
-                        "Invalid layout: screenHeight=" + screenHeight +
-                        ", top=" + topOffset +
-                        ", bottom=" + bottomOffset
-                );
-            }
-
-            Log.d(TAG, "Calculated WebView height=" + calculatedHeight);
+           
 
             // ----------------------------
             // Container
@@ -374,12 +350,14 @@ public class EmbeddedWebView extends CordovaPlugin {
 
             container.addView(progressBar, progressParams);
 
-            FrameLayout.LayoutParams containerParams =
-                    new FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            calculatedHeight
-                    );
+            ViewGroup.MarginLayoutParams containerParams =
+                new ViewGroup.MarginLayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                );
+
             containerParams.topMargin = topOffset;
+            containerParams.bottomMargin = bottomOffset;
 
             contentView.addView(container, containerParams);
             container.bringToFront();
