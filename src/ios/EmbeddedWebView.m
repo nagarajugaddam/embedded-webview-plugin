@@ -307,12 +307,15 @@
         dispatch_group_enter(group);
 
         NSMutableDictionary *props = @{
-            NSHTTPCookieName: name,
-            NSHTTPCookieValue: value,
-            NSHTTPCookieDomain: domain,
-            NSHTTPCookiePath: @"/",
-            NSHTTPCookieSameSitePolicy: NSHTTPCookieSameSiteNone
-        }.mutableCopy;
+        NSHTTPCookieName: name,
+        NSHTTPCookieValue: value,
+        NSHTTPCookieDomain: domain,
+        NSHTTPCookiePath: @"/"
+    }.mutableCopy;
+
+if (@available(iOS 13.0, *)) {
+    props[NSHTTPCookieSameSitePolicy] = NSHTTPCookieSameSiteNone;
+}
 
         if (isSecure) {
             props[NSHTTPCookieSecure] = @"TRUE";
