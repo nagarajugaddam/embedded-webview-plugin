@@ -29,6 +29,7 @@ import java.util.Iterator;
 import java.util.Map;
 import android.graphics.Bitmap;
 import android.view.Gravity;
+import android.view.ViewParent;
 
 
 
@@ -182,7 +183,7 @@ public class EmbeddedWebView extends CordovaPlugin {
             // ----------------------------
             // Resolve Cordova root container
             // ----------------------------
-            View parent = cordovaWebView.getView().getParent();
+            ViewParent parent = cordovaWebView.getView().getParent();
             if (!(parent instanceof ViewGroup)) {
                 throw new IllegalStateException("Cordova WebView has no valid parent ViewGroup");
             }
