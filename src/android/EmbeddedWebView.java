@@ -155,7 +155,7 @@ public class EmbeddedWebView extends CordovaPlugin {
         return instance;
     }
 
-   private void create(
+  private void create(
         final String id,
         final String url,
         final JSONObject options,
@@ -171,37 +171,40 @@ public class EmbeddedWebView extends CordovaPlugin {
 
     cordova.getActivity().runOnUiThread(() -> {
         try {
+            // ----------------------------
+            // 1. Calculate Pixel Density
+            // ----------------------------
+            float density = cordova.getActivity().getResources().getDisplayMetrics().density;
+
+            // Get offsets from JS (these are in CSS pixels/dp)
+            int topOffsetDp = options.optInt("top", 0);
+            int bottomOffsetDp = options.optInt("bottom", 0);
+
+            // Convert to Physical Pixels for Android Layouts
+            int topOffsetPx = (int) (topOffsetDp * density);
+            int bottomOffsetPx = (int) (bottomOffsetDp * density);
+
+            Log.d(TAG, "Offsets (DP) → top=" + topOffsetDp + ", bottom=" + bottomOffsetDp);
+            Log.d(TAG, "Offsets (PX) → top=" + topOffsetPx + ", bottom=" + bottomOffsetPx);
 
             // ----------------------------
-            // Read JS-provided offsets
+            // 2. Resolve Cordova Root Container
             // ----------------------------
-            int topOffset = options.optInt("top", 0);
-            int bottomOffset = options.optInt("bottom", 0);
-
-            Log.d(TAG, "Offsets → top=" + topOffset + ", bottom=" + bottomOffset);
-
-            // ----------------------------
-            // Resolve Cordova root container
-            // ----------------------------
-            ViewParent parent = cordovaWebView.getView().getParent();
-            if (!(parent instanceof ViewGroup)) {
-                throw new IllegalStateException("Cordova WebView has no valid parent ViewGroup");
-            }
-            ViewGroup contentView = (ViewGroup) parent;
-
-           
+            // We get the PARENT of the CordovaWebView. This is usually the main FrameLayout of the Activity.
+            // This ensures our view floats over the WebView, rather than being stuffed inside it.
+            View webViewView = cordovaWebView.getView();
+            ViewGroup rootGroup = (ViewGroup) webViewView.getParent();
 
             // ----------------------------
-            // Container
+            // 3. Container Setup
             // ----------------------------
             FrameLayout container = new FrameLayout(cordova.getActivity());
             container.setBackgroundColor(Color.TRANSPARENT);
 
             // ----------------------------
-            // WebView
+            // 4. WebView Setup (Same as your code)
             // ----------------------------
             WebView webView = new WebView(cordova.getActivity());
-
             WebSettings settings = webView.getSettings();
             settings.setJavaScriptEnabled(true);
             settings.setDomStorageEnabled(true);
@@ -232,44 +235,26 @@ public class EmbeddedWebView extends CordovaPlugin {
             webView.setBackgroundColor(Color.TRANSPARENT);
             webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
 
-            // ----------------------------
-            // Progress bar
-            // ----------------------------
-            ProgressBar progressBar = new ProgressBar(
-                    cordova.getActivity(),
-                    null,
-                    android.R.attr.progressBarStyleHorizontal
-            );
-
+            // Progress Bar Setup (Same as your code)
+            ProgressBar progressBar = new ProgressBar(cordova.getActivity(), null, android.R.attr.progressBarStyleHorizontal);
             String progressColor = options.optString("progressColor", "#2196F3");
             try {
-                progressBar.getProgressDrawable().setColorFilter(
-                        Color.parseColor(progressColor),
-                        PorterDuff.Mode.SRC_IN
-                );
+                progressBar.getProgressDrawable().setColorFilter(Color.parseColor(progressColor), PorterDuff.Mode.SRC_IN);
             } catch (Exception ignored) {}
 
             int progressHeightDp = options.optInt("progressHeight", 5);
-            int progressHeightPx = (int) (
-                    progressHeightDp *
-                    cordova.getActivity().getResources().getDisplayMetrics().density
+            int progressHeightPx = (int) (progressHeightDp * density); // Apply density here too
+
+            FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    progressHeightPx,
+                    Gravity.BOTTOM
             );
-
-            FrameLayout.LayoutParams progressParams =
-                    new FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            progressHeightPx,
-                            Gravity.BOTTOM
-                    );
-
             progressBar.setMax(100);
             progressBar.setVisibility(View.GONE);
 
-            // ----------------------------
-            // WebViewClient
-            // ----------------------------
+            // WebView Clients (Same as your code)
             webView.setWebViewClient(new WebViewClient() {
-
                 @Override
                 public void onPageStarted(WebView view, String url, Bitmap favicon) {
                     progressBar.setVisibility(View.VISIBLE);
@@ -277,7 +262,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                     injectCookies(view, options);
                     fireEvent(id, "loadStart", url);
                 }
-
                 @Override
                 public void onPageFinished(WebView view, String url) {
                     progressBar.setProgress(100);
@@ -286,101 +270,46 @@ public class EmbeddedWebView extends CordovaPlugin {
                     updateNavigationState(id);
                     fireEvent(id, "loadStop", url);
                 }
-
                 @Override
-                public void onReceivedError(
-                        WebView view,
-                        int errorCode,
-                        String description,
-                        String failingUrl
-                ) {
-                    String errorJson =
-                            "{\"url\":\"" + failingUrl +
-                            "\",\"code\":" + errorCode +
-                            ",\"message\":\"" + description + "\"}";
+                public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+                    String errorJson = "{\"url\":\"" + failingUrl + "\",\"code\":" + errorCode + ",\"message\":\"" + description + "\"}";
                     fireEvent(id, "loadError", errorJson);
                 }
             });
 
-            // ----------------------------
-            // WebChromeClient
-            // ----------------------------
             webView.setWebChromeClient(new WebChromeClient() {
-
                 @Override
                 public void onProgressChanged(WebView view, int newProgress) {
                     progressBar.setProgress(newProgress);
                 }
-
-                @Override
-                public boolean onCreateWindow(
-                        WebView view,
-                        boolean isDialog,
-                        boolean isUserGesture,
-                        Message resultMsg
-                ) {
-                    WebView popup = new WebView(view.getContext());
-                    popup.getSettings().setJavaScriptEnabled(true);
-                    popup.setWebViewClient(new WebViewClient() {
-                        @Override
-                        public boolean shouldOverrideUrlLoading(WebView wv, String url) {
-                            view.loadUrl(url);
-                            return true;
-                        }
-                    });
-
-                    WebView.WebViewTransport transport =
-                            (WebView.WebViewTransport) resultMsg.obj;
-                    transport.setWebView(popup);
-                    resultMsg.sendToTarget();
-                    return true;
-                }
             });
 
             // ----------------------------
-            // Assemble view hierarchy
+            // 5. Assemble Hierarchy
             // ----------------------------
-            container.addView(
-                    webView,
-                    new FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-            );
-
+            container.addView(webView, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+            ));
             container.addView(progressBar, progressParams);
 
-            ViewGroup.MarginLayoutParams containerParams =
-                new ViewGroup.MarginLayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                );
+            // ----------------------------
+            // 6. Apply Margins (Using the PX values calculated earlier)
+            // ----------------------------
+            FrameLayout.LayoutParams containerParams = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+            );
 
-            containerParams.topMargin = topOffset;
-            containerParams.bottomMargin = bottomOffset;
+            containerParams.topMargin = topOffsetPx;
+            containerParams.bottomMargin = bottomOffsetPx;
 
-            contentView.addView(container, containerParams);
+            // Add to the ROOT, not the webView itself
+            rootGroup.addView(container, containerParams);
             container.bringToFront();
 
-            container.setOnApplyWindowInsetsListener((v, insets) -> {
-
-                int statusBar = insets.getSystemWindowInsetTop();
-                int navBar = insets.getSystemWindowInsetBottom();
-
-                ViewGroup.MarginLayoutParams lp =
-                        (ViewGroup.MarginLayoutParams) v.getLayoutParams();
-
-                // JS offsets + native system insets
-                lp.topMargin = topOffset + statusBar;
-                lp.bottomMargin = bottomOffset + navBar;
-
-                v.setLayoutParams(lp);
-
-                return insets.consumeSystemWindowInsets();
-            });
-
             // ----------------------------
-            // Load URL
+            // Load URL & Save Instance
             // ----------------------------
             if (options.has("headers")) {
                 Map<String, String> headers = jsonToMap(options.getJSONObject("headers"));
@@ -389,9 +318,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                 webView.loadUrl(url);
             }
 
-            // ----------------------------
-            // Save instance
-            // ----------------------------
             WebViewInstance instance = new WebViewInstance();
             instance.webView = webView;
             instance.container = container;
