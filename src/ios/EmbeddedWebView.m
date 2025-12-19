@@ -283,19 +283,27 @@
         return;
     }
 
+    NSString *domain = url.host;
+    if (!domain || domain.length == 0) {
+        NSLog(@"[EmbeddedWebView] Cookie injection skipped: invalid domain");
+        completion();
+        return;
+    }
+
     WKHTTPCookieStore *cookieStore = config.websiteDataStore.httpCookieStore;
     dispatch_group_t group = dispatch_group_create();
 
     BOOL isSecure = [url.scheme.lowercaseString isEqualToString:@"https"];
-    NSString *domain = url.host;
+    BOOL isIPAddress = [[NSPredicate predicateWithFormat:
+        @"SELF MATCHES %@", @"^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$"]
+        evaluateWithObject:domain];
 
-    if (![domain hasPrefix:@"."]) {
+    if (!isIPAddress && ![domain hasPrefix:@"."]) {
         domain = [@"." stringByAppendingString:domain];
     }
 
     for (NSString *name in cookies) {
         NSString *value = [cookies[name] description];
-
         dispatch_group_enter(group);
 
         NSMutableDictionary *props = @{
@@ -318,10 +326,11 @@
     }
 
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
-        NSLog(@"[EmbeddedWebView] Cookies injected before page load");
+        NSLog(@"[EmbeddedWebView] Cookies injected");
         completion();
     });
 }
+
 
 
 #pragma mark - Destroy
