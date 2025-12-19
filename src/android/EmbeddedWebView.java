@@ -30,6 +30,8 @@ import java.util.Map;
 import android.graphics.Bitmap;
 import android.view.Gravity;
 
+
+
 public class EmbeddedWebView extends CordovaPlugin {
 
     private static final String TAG = "EmbeddedWebView";
@@ -152,40 +154,75 @@ public class EmbeddedWebView extends CordovaPlugin {
         return instance;
     }
 
-   private void create(final String id,
-                    final String url,
-                    final JSONObject options,
-                    final CallbackContext callbackContext) {
+   private void create(
+        final String id,
+        final String url,
+        final JSONObject options,
+        final CallbackContext callbackContext
+) {
 
     Log.d(TAG, "Creating WebView (id=" + id + ")");
 
     if (instances.containsKey(id)) {
-        Log.w(TAG, "WebView for id=" + id + " already exists, destroying before creating a new one");
+        Log.w(TAG, "WebView already exists for id=" + id + ", destroying first");
         destroy(id, null);
     }
 
     cordova.getActivity().runOnUiThread(() -> {
         try {
+
+            // ----------------------------
+            // Read JS-provided offsets
+            // ----------------------------
             int topOffset = options.optInt("top", 0);
             int bottomOffset = options.optInt("bottom", 0);
 
-            Log.d(TAG, "WebView config (id=" + id + ") - URL: " + url);
-            Log.d(TAG, "User offsets - Top: " + topOffset + "px, Bottom: " + bottomOffset + "px");
+            Log.d(TAG, "Offsets → top=" + topOffset + ", bottom=" + bottomOffset);
 
-            // ✅ FIX 1: Attach to Cordova root (NOT decorView)
-            ViewGroup contentView =
-                    (ViewGroup) cordovaWebView.getView().getParent();
+            // ----------------------------
+            // Resolve Cordova root container
+            // ----------------------------
+            View parent = cordovaWebView.getView().getParent();
+            if (!(parent instanceof ViewGroup)) {
+                throw new IllegalStateException("Cordova WebView has no valid parent ViewGroup");
+            }
+            ViewGroup contentView = (ViewGroup) parent;
 
-            FrameLayout webViewContainer = new FrameLayout(cordova.getActivity());
+            // ----------------------------
+            // Determine available screen height
+            // ----------------------------
+            View rootView = cordovaWebView.getView().getRootView();
+            int screenHeight = rootView.getHeight();
 
-            // ✅ FIX 2: Use padding instead of margins
-            webViewContainer.setPadding(
-                    0,
-                    topOffset,
-                    0,
-                    bottomOffset
-            );
+            if (screenHeight <= 0) {
+                screenHeight = contentView.getHeight();
+            }
 
+            if (screenHeight <= 0) {
+                throw new IllegalStateException("Unable to determine screen height");
+            }
+
+            int calculatedHeight = screenHeight - topOffset - bottomOffset;
+
+            if (calculatedHeight <= 0) {
+                throw new IllegalStateException(
+                        "Invalid layout: screenHeight=" + screenHeight +
+                        ", top=" + topOffset +
+                        ", bottom=" + bottomOffset
+                );
+            }
+
+            Log.d(TAG, "Calculated WebView height=" + calculatedHeight);
+
+            // ----------------------------
+            // Container
+            // ----------------------------
+            FrameLayout container = new FrameLayout(cordova.getActivity());
+            container.setBackgroundColor(Color.TRANSPARENT);
+
+            // ----------------------------
+            // WebView
+            // ----------------------------
             WebView webView = new WebView(cordova.getActivity());
 
             WebSettings settings = webView.getSettings();
@@ -212,13 +249,15 @@ public class EmbeddedWebView extends CordovaPlugin {
                 settings.setUserAgentString(options.getString("userAgent"));
             }
 
-            settings.setCacheMode(WebSettings.LOAD_DEFAULT);
-            webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-
             webView.setVerticalScrollBarEnabled(false);
             webView.setHorizontalScrollBarEnabled(false);
             webView.setOverScrollMode(WebView.OVER_SCROLL_NEVER);
+            webView.setBackgroundColor(Color.TRANSPARENT);
+            webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
 
+            // ----------------------------
+            // Progress bar
+            // ----------------------------
             ProgressBar progressBar = new ProgressBar(
                     cordova.getActivity(),
                     null,
@@ -233,9 +272,11 @@ public class EmbeddedWebView extends CordovaPlugin {
                 );
             } catch (Exception ignored) {}
 
-            int progressHeight = options.optInt("progressHeight", 5);
-            float density = cordova.getActivity().getResources().getDisplayMetrics().density;
-            int progressHeightPx = (int) (progressHeight * density);
+            int progressHeightDp = options.optInt("progressHeight", 5);
+            int progressHeightPx = (int) (
+                    progressHeightDp *
+                    cordova.getActivity().getResources().getDisplayMetrics().density
+            );
 
             FrameLayout.LayoutParams progressParams =
                     new FrameLayout.LayoutParams(
@@ -247,6 +288,9 @@ public class EmbeddedWebView extends CordovaPlugin {
             progressBar.setMax(100);
             progressBar.setVisibility(View.GONE);
 
+            // ----------------------------
+            // WebViewClient
+            // ----------------------------
             webView.setWebViewClient(new WebViewClient() {
 
                 @Override
@@ -261,21 +305,29 @@ public class EmbeddedWebView extends CordovaPlugin {
                 public void onPageFinished(WebView view, String url) {
                     progressBar.setProgress(100);
                     progressBar.postDelayed(() -> progressBar.setVisibility(View.GONE), 200);
-
                     injectCookies(view, options);
                     updateNavigationState(id);
                     fireEvent(id, "loadStop", url);
                 }
 
                 @Override
-                public void onReceivedError(WebView view, int errorCode,
-                                            String description, String failingUrl) {
-                    String errorJson = "{\"url\":\"" + failingUrl + "\",\"code\":" +
-                            errorCode + ",\"message\":\"" + description + "\"}";
+                public void onReceivedError(
+                        WebView view,
+                        int errorCode,
+                        String description,
+                        String failingUrl
+                ) {
+                    String errorJson =
+                            "{\"url\":\"" + failingUrl +
+                            "\",\"code\":" + errorCode +
+                            ",\"message\":\"" + description + "\"}";
                     fireEvent(id, "loadError", errorJson);
                 }
             });
 
+            // ----------------------------
+            // WebChromeClient
+            // ----------------------------
             webView.setWebChromeClient(new WebChromeClient() {
 
                 @Override
@@ -284,13 +336,15 @@ public class EmbeddedWebView extends CordovaPlugin {
                 }
 
                 @Override
-                public boolean onCreateWindow(WebView view, boolean isDialog,
-                                              boolean isUserGesture, Message resultMsg) {
-
-                    WebView popupWebView = new WebView(view.getContext());
-                    popupWebView.getSettings().setJavaScriptEnabled(true);
-
-                    popupWebView.setWebViewClient(new WebViewClient() {
+                public boolean onCreateWindow(
+                        WebView view,
+                        boolean isDialog,
+                        boolean isUserGesture,
+                        Message resultMsg
+                ) {
+                    WebView popup = new WebView(view.getContext());
+                    popup.getSettings().setJavaScriptEnabled(true);
+                    popup.setWebViewClient(new WebViewClient() {
                         @Override
                         public boolean shouldOverrideUrlLoading(WebView wv, String url) {
                             view.loadUrl(url);
@@ -300,15 +354,16 @@ public class EmbeddedWebView extends CordovaPlugin {
 
                     WebView.WebViewTransport transport =
                             (WebView.WebViewTransport) resultMsg.obj;
-                    transport.setWebView(popupWebView);
+                    transport.setWebView(popup);
                     resultMsg.sendToTarget();
                     return true;
                 }
             });
 
-            webView.setBackgroundColor(Color.TRANSPARENT);
-
-            webViewContainer.addView(
+            // ----------------------------
+            // Assemble view hierarchy
+            // ----------------------------
+            container.addView(
                     webView,
                     new FrameLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -316,29 +371,34 @@ public class EmbeddedWebView extends CordovaPlugin {
                     )
             );
 
-            webViewContainer.addView(progressBar, progressParams);
+            container.addView(progressBar, progressParams);
 
-            // ✅ FIX 3: MATCH_PARENT layout, no margins
             FrameLayout.LayoutParams containerParams =
                     new FrameLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
+                            calculatedHeight
                     );
+            containerParams.topMargin = topOffset;
 
-            contentView.addView(webViewContainer, containerParams);
-            webViewContainer.bringToFront();
+            contentView.addView(container, containerParams);
+            container.bringToFront();
 
+            // ----------------------------
+            // Load URL
+            // ----------------------------
             if (options.has("headers")) {
-                Map<String, String> headers =
-                        jsonToMap(options.getJSONObject("headers"));
+                Map<String, String> headers = jsonToMap(options.getJSONObject("headers"));
                 webView.loadUrl(url, headers);
             } else {
                 webView.loadUrl(url);
             }
 
+            // ----------------------------
+            // Save instance
+            // ----------------------------
             WebViewInstance instance = new WebViewInstance();
             instance.webView = webView;
-            instance.container = webViewContainer;
+            instance.container = container;
             instance.progressBar = progressBar;
 
             instances.put(id, instance);
@@ -352,6 +412,7 @@ public class EmbeddedWebView extends CordovaPlugin {
         }
     });
 }
+
 
 
     private void injectCookies(WebView webView, JSONObject options) {
