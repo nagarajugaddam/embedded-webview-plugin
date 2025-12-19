@@ -362,6 +362,23 @@ public class EmbeddedWebView extends CordovaPlugin {
             contentView.addView(container, containerParams);
             container.bringToFront();
 
+            container.setOnApplyWindowInsetsListener((v, insets) -> {
+
+                int statusBar = insets.getSystemWindowInsetTop();
+                int navBar = insets.getSystemWindowInsetBottom();
+
+                ViewGroup.MarginLayoutParams lp =
+                        (ViewGroup.MarginLayoutParams) v.getLayoutParams();
+
+                // JS offsets + native system insets
+                lp.topMargin = topOffset + statusBar;
+                lp.bottomMargin = bottomOffset + navBar;
+
+                v.setLayoutParams(lp);
+
+                return insets.consumeSystemWindowInsets();
+            });
+
             // ----------------------------
             // Load URL
             // ----------------------------
