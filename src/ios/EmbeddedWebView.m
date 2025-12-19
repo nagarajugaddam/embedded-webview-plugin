@@ -1,6 +1,6 @@
 //
 //  EmbeddedWebView.m
-//  Cordova Plugin - EmbeddedWebView (multi-instance, per-instance events)
+//  Cordova Plugin - EmbeddedWebView
 //
 
 #import "EmbeddedWebView.h"
@@ -17,7 +17,6 @@
 @property (nonatomic, assign) BOOL canGoBack;
 @property (nonatomic, assign) BOOL canGoForward;
 @property (nonatomic, strong) NSDictionary *cookies;
-
 @end
 
 @implementation EmbeddedWebViewInstance
@@ -27,12 +26,26 @@
 
 @implementation EmbeddedWebView
 
+// -----------------------------------------------------------------------
+// FIX 1: SHARED PROCESS POOL (Singleton)
+// -----------------------------------------------------------------------
+// This ensures all WebViews share the same cookie/cache process.
+// Without this, cookies set in Native often don't appear in JS immediately.
++ (WKProcessPool *)sharedProcessPool {
+    static WKProcessPool *_sharedPool = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        _sharedPool = [[WKProcessPool alloc] init];
+    });
+    return _sharedPool;
+}
+
 - (void)pluginInitialize {
     [super pluginInitialize];
     self.instances = [NSMutableDictionary dictionary];
     self.lastCreatedId = nil;
     self.currentCallbackId = nil;
-    NSLog(@"[EmbeddedWebView] Plugin initialized (multi-instance)");
+    NSLog(@"[EmbeddedWebView] Plugin initialized");
 }
 
 #pragma mark - Helper: instance lookup
@@ -64,10 +77,8 @@
 
 #pragma mark - Create
 
-// JS: EmbeddedWebView.create(id, url, options, ...)
 - (void)create:(CDVInvokedUrlCommand*)command {
-    NSLog(@"[EmbeddedWebView] Creating WebView (multi-instance)");
-
+    NSLog(@"[EmbeddedWebView] Creating WebView");
 
     NSString *instanceId = [command argumentAtIndex:0];
     NSString *url = [command argumentAtIndex:1];
@@ -95,26 +106,18 @@
         return;
     }
 
-    // If instance already exists for this id, destroy it first
     if (self.instances[instanceId]) {
-        NSLog(@"[EmbeddedWebView] WebView for id=%@ already exists, destroying before creating new one", instanceId);
         [self destroyInstanceWithId:instanceId sendCallback:NO callbackId:nil];
     }
 
     [self.commandDelegate runInBackground:^{
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
-
-
+                // ... (Layout Calculation Code remains the same) ...
                 NSNumber *topOffset = options[@"top"] ?: @0;
                 NSNumber *bottomOffset = options[@"bottom"] ?: @0;
-
-                NSLog(@"[EmbeddedWebView] WebView config (id=%@) - URL: %@", instanceId, url);
-                NSLog(@"[EmbeddedWebView] User offsets - Top: %@px, Bottom: %@px", topOffset, bottomOffset);
-
                 CGFloat safeTop = 0;
                 CGFloat safeBottom = 0;
-
                 if (@available(iOS 11.0, *)) {
                     UIWindow *window = UIApplication.sharedApplication.keyWindow;
                     if (window) {
@@ -122,63 +125,49 @@
                         safeBottom = window.safeAreaInsets.bottom;
                     }
                 }
-
-                NSLog(@"[EmbeddedWebView] Safe area insets - Top: %.0fpx, Bottom: %.0fpx", safeTop, safeBottom);
-
                 CGFloat finalTopMargin = safeTop + [topOffset floatValue];
                 CGFloat finalBottomMargin = safeBottom + [bottomOffset floatValue];
-
-                NSLog(@"[EmbeddedWebView] Final margins - Top: %.0fpx, Bottom: %.0fpx", finalTopMargin, finalBottomMargin);
-
+                // ... (End Layout Calculation) ...
 
                 instance.container = [[UIView alloc] init];
                 instance.container.backgroundColor = [UIColor clearColor];
 
                 // Configure WKWebView
                 WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
+                
+                // -----------------------------------------------------------------------
+                // FIX 2: ASSIGN SHARED POOL & DATA STORE
+                // -----------------------------------------------------------------------
+                config.processPool = [EmbeddedWebView sharedProcessPool];
+                config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
+
                 config.allowsInlineMediaPlayback = YES;
-
-                if (@available(iOS 10.0, *)) {
-                    config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
-                } else {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-                    config.requiresUserActionForMediaPlayback = NO;
-#pragma clang diagnostic pop
-                }
-
                 config.preferences.javaScriptCanOpenWindowsAutomatically = YES;
                 config.preferences.javaScriptEnabled = YES;
+                if (@available(iOS 10.0, *)) {
+                    config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
+                }
 
-                 // ---------------------------------------------------------
-                // START FIX: Inject Cookies for JavaScript (Document Start)
-                // ---------------------------------------------------------
+                // JS COOKIE INJECTION (FALLBACK)
                 if (instance.cookies && instance.cookies.count > 0) {
                     NSMutableString *cookieJs = [NSMutableString string];
-                    
                     for (NSString *name in instance.cookies) {
-                        NSString *value = [[instance.cookies[name] description] stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
-                        // We strictly set path=/ to ensure visibility. 
-                        // You can optionally add domain logic here if needed.
-                        [cookieJs appendFormat:@"document.cookie='%@=%@; path=/';", name, value];
+                        // FIX: Better escaping for values
+                        NSString *rawVal = [instance.cookies[name] description];
+                        // Basic escaping for single quotes
+                        NSString *val = [rawVal stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
+                        [cookieJs appendFormat:@"document.cookie='%@=%@; path=/';", name, val];
                     }
-                    
-                    WKUserScript *cookieScript = [[WKUserScript alloc] 
+                    WKUserScript *cookieScript = [[WKUserScript alloc]
                         initWithSource:cookieJs
                         injectionTime:WKUserScriptInjectionTimeAtDocumentStart
                         forMainFrameOnly:NO];
-                        
                     [config.userContentController addUserScript:cookieScript];
                 }
-                // ---------------------------------------------------------
-                // END FIX
-                // ---------------------------------------------------------
 
                 if ([options[@"enableZoom"] boolValue]) {
                     NSString *viewport = @"var meta = document.createElement('meta'); meta.name = 'viewport'; meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes'; document.getElementsByTagName('head')[0].appendChild(meta);";
-                    WKUserScript *script = [[WKUserScript alloc] initWithSource:viewport
-                                                                  injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
-                                                               forMainFrameOnly:YES];
+                    WKUserScript *script = [[WKUserScript alloc] initWithSource:viewport injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES];
                     [config.userContentController addUserScript:script];
                 }
 
@@ -187,235 +176,179 @@
                 webView.navigationDelegate = self;
                 webView.UIDelegate = self;
                 webView.scrollView.bounces = YES;
-                webView.scrollView.showsVerticalScrollIndicator = NO;
-                webView.scrollView.showsHorizontalScrollIndicator = NO;
                 webView.backgroundColor = [UIColor clearColor];
                 webView.opaque = NO;
 
                 if (options[@"userAgent"]) {
                     webView.customUserAgent = options[@"userAgent"];
                 }
-
+                
+                // Clean cache if requested
                 if ([options[@"clearCache"] boolValue]) {
-                    NSSet *websiteDataTypes = [NSSet setWithArray:@[
-                        WKWebsiteDataTypeDiskCache,
-                        WKWebsiteDataTypeMemoryCache
-                    ]];
-                    NSDate *dateFrom = [NSDate dateWithTimeIntervalSince1970:0];
-                    [[WKWebsiteDataStore defaultDataStore] removeDataOfTypes:websiteDataTypes
-                                                               modifiedSince:dateFrom
-                                                           completionHandler:^{}];
+                    NSSet *types = [NSSet setWithArray:@[WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache]];
+                    [[WKWebsiteDataStore defaultDataStore] removeDataOfTypes:types modifiedSince:[NSDate dateWithTimeIntervalSince1970:0] completionHandler:^{}];
                 }
 
-                [webView addObserver:self
-                           forKeyPath:@"estimatedProgress"
-                              options:NSKeyValueObservingOptionNew
-                              context:nil];
+                [webView addObserver:self forKeyPath:@"estimatedProgress" options:NSKeyValueObservingOptionNew context:nil];
 
-                // Progress bar
+                // Progress UI
                 UIProgressView *progressBar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
                 instance.progressBar = progressBar;
-
-                NSString *progressColor = options[@"progressColor"] ?: @"#2196F3";
-                progressBar.progressTintColor = [self colorFromHexString:progressColor];
-
-                NSNumber *progressHeight = options[@"progressHeight"] ?: @5;
-                CGFloat progressHeightValue = [progressHeight floatValue];
-
+                progressBar.progressTintColor = [self colorFromHexString:options[@"progressColor"] ?: @"#2196F3"];
                 progressBar.hidden = YES;
-
+                
                 [instance.container addSubview:webView];
                 [instance.container addSubview:progressBar];
 
                 UIView *mainView = self.webView.superview ?: [UIApplication sharedApplication].keyWindow;
-                if (!mainView) {
-                    mainView = self.webView;
-                }
+                if (!mainView) mainView = self.webView;
                 [mainView addSubview:instance.container];
 
-                // Auto Layout
+                // Constraints
                 instance.container.translatesAutoresizingMaskIntoConstraints = NO;
                 webView.translatesAutoresizingMaskIntoConstraints = NO;
                 progressBar.translatesAutoresizingMaskIntoConstraints = NO;
+                CGFloat ph = [options[@"progressHeight"] floatValue] ?: 5.0;
 
                 [NSLayoutConstraint activateConstraints:@[
-                    // Container
                     [instance.container.leadingAnchor constraintEqualToAnchor:mainView.leadingAnchor],
                     [instance.container.trailingAnchor constraintEqualToAnchor:mainView.trailingAnchor],
                     [instance.container.topAnchor constraintEqualToAnchor:mainView.topAnchor constant:finalTopMargin],
                     [instance.container.bottomAnchor constraintEqualToAnchor:mainView.bottomAnchor constant:-finalBottomMargin],
-
-                    // WebView
                     [webView.leadingAnchor constraintEqualToAnchor:instance.container.leadingAnchor],
                     [webView.trailingAnchor constraintEqualToAnchor:instance.container.trailingAnchor],
                     [webView.topAnchor constraintEqualToAnchor:instance.container.topAnchor],
                     [webView.bottomAnchor constraintEqualToAnchor:instance.container.bottomAnchor],
-
-                    // Progress bar
                     [progressBar.leadingAnchor constraintEqualToAnchor:instance.container.leadingAnchor],
                     [progressBar.trailingAnchor constraintEqualToAnchor:instance.container.trailingAnchor],
                     [progressBar.bottomAnchor constraintEqualToAnchor:instance.container.bottomAnchor],
-                    [progressBar.heightAnchor constraintEqualToConstant:progressHeightValue]
+                    [progressBar.heightAnchor constraintEqualToConstant:ph]
                 ]];
 
                 NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
-
                 if (options[@"headers"]) {
-                    NSDictionary *headers = options[@"headers"];
-                    for (NSString *key in headers) {
-                        [request setValue:headers[key] forHTTPHeaderField:key];
+                    for (NSString *key in options[@"headers"]) {
+                        [request setValue:options[@"headers"][key] forHTTPHeaderField:key];
                     }
                 }
 
-                 // ---------------------------------------------------------
-                // START FIX: Manually set Cookie header for initial request
-                // ---------------------------------------------------------
+                // HEADER COOKIE INJECTION (INITIAL REQUEST ONLY)
                 if (instance.cookies && instance.cookies.count > 0) {
                     NSMutableString *cookieHeader = [NSMutableString string];
                     for (NSString *name in instance.cookies) {
-                        NSString *value = [instance.cookies[name] description];
-                        if (cookieHeader.length > 0) {
-                            [cookieHeader appendString:@"; "];
-                        }
-                        [cookieHeader appendFormat:@"%@=%@", name, value];
+                        if (cookieHeader.length > 0) [cookieHeader appendString:@"; "];
+                        [cookieHeader appendFormat:@"%@=%@", name, instance.cookies[name]];
                     }
                     [request setValue:cookieHeader forHTTPHeaderField:@"Cookie"];
                 }
-                // ---------------------------------------------------------
-                // END FIX
-                // ---------------------------------------------------------
 
-                WKHTTPCookieStore *cookieStore =
-                        WKWebsiteDataStore.defaultDataStore.httpCookieStore;
+                // -----------------------------------------------------------------------
+                // FIX 3: ASYNC STORE SETTER (WAIT LOGIC)
+                // -----------------------------------------------------------------------
+                WKHTTPCookieStore *cookieStore = config.websiteDataStore.httpCookieStore;
+                NSURL *pageURL = [NSURL URLWithString:url];
+                
+                // Safety check: if URL is invalid, host is nil, cookies fail.
+                NSString *domain = pageURL.host ?: @"";
 
-                    NSURL *pageURL = [NSURL URLWithString:url];
+                NSArray *cookieKeys = instance.cookies ? instance.cookies.allKeys : @[];
+                __block NSInteger pendingCookies = cookieKeys.count;
 
-                    NSArray *cookieKeys = instance.cookies ? instance.cookies.allKeys : @[];
-                    __block NSInteger pendingCookies = cookieKeys.count;
-
-                    if (pendingCookies == 0) {
+                void (^startLoad)(void) = ^{
+                    dispatch_async(dispatch_get_main_queue(), ^{
                         [webView loadRequest:request];
-                    } else {
-                        for (NSString *name in cookieKeys) {
-                            NSString *value = [[instance.cookies[name] description] copy];
+                    });
+                };
 
-                            NSMutableDictionary *props = [@{
-                                NSHTTPCookieName: name,
-                                NSHTTPCookieValue: value,
-                                NSHTTPCookieDomain: pageURL.host,
-                                NSHTTPCookiePath: @"/"
-                            } mutableCopy];
-
-                            if (@available(iOS 13.0, *)) {
-                                props[NSHTTPCookieSameSitePolicy] = NSHTTPCookieSameSiteLax;
-                            }
-
-                            NSHTTPCookie *cookie =
-                                [NSHTTPCookie cookieWithProperties:props];
-
-                            [cookieStore setCookie:cookie completionHandler:^{
-                                pendingCookies--;
-                                if (pendingCookies == 0) {
-                                    dispatch_async(dispatch_get_main_queue(), ^{
-                                        [webView loadRequest:request];
-                                    });
-                                }
-                            }];
+                if (pendingCookies == 0) {
+                    startLoad();
+                } else {
+                    for (NSString *name in cookieKeys) {
+                        NSString *value = [[instance.cookies[name] description] copy];
+                        
+                        NSMutableDictionary *props = [NSMutableDictionary dictionary];
+                        props[NSHTTPCookieName] = name;
+                        props[NSHTTPCookieValue] = value;
+                        props[NSHTTPCookiePath] = @"/";
+                        
+                        // IMPORTANT: Only set domain if we have one. 
+                        // If domain is nil, iOS treats it as "Host Only" which is safer for ad-hoc loading.
+                        if (domain.length > 0) {
+                            props[NSHTTPCookieDomain] = domain;
                         }
+                        
+                        // IMPORTANT: Do NOT set HttpOnly if you want to read it in JS
+                        // props[NSHTTPCookieDiscard] = @"FALSE"; // Optional: keep across session
+
+                        if (@available(iOS 13.0, *)) {
+                            props[NSHTTPCookieSameSitePolicy] = NSHTTPCookieSameSiteLax;
+                        }
+
+                        NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:props];
+                        
+                        [cookieStore setCookie:cookie completionHandler:^{
+                            pendingCookies--;
+                            if (pendingCookies <= 0) {
+                                // Add a tiny delay to allow the process pool to sync
+                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                    startLoad();
+                                });
+                            }
+                        }];
                     }
+                }
 
-
-
-
-                // Save instance
                 self.instances[instanceId] = instance;
                 self.lastCreatedId = instanceId;
-
-                NSLog(@"[EmbeddedWebView] WebView created successfully with progress bar (id=%@)", instanceId);
-
-                CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
-                                                            messageAsString:@"WebView created successfully"];
-                [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
+                
+                [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:@"WebView created"] callbackId:command.callbackId];
 
             } @catch (NSException *exception) {
-                NSLog(@"[EmbeddedWebView] Error creating WebView (id=%@): %@", instanceId, exception.reason);
-                CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
-                                                            messageAsString:[NSString stringWithFormat:@"Error creating WebView: %@", exception.reason]];
-                [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
+                NSLog(@"[EmbeddedWebView] Error: %@", exception);
+                [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:exception.reason] callbackId:command.callbackId];
             }
         });
     }];
 }
+
+
+
 
 #pragma mark - Destroy
 
 // JS: EmbeddedWebView.destroy(id, ...)
 - (void)destroy:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
-
-    if (!instanceId || instanceId.length == 0) {
-        CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
-                                                    messageAsString:@"id must be a non-empty string"];
-        [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
-        return;
-    }
-
+    if (!instanceId) return;
     [self destroyInstanceWithId:instanceId sendCallback:YES callbackId:command.callbackId];
 }
 
-- (void)destroyInstanceWithId:(NSString *)instanceId
-                 sendCallback:(BOOL)sendCallback
-                   callbackId:(NSString *)callbackId {
-
+- (void)destroyInstanceWithId:(NSString *)instanceId sendCallback:(BOOL)sendCallback callbackId:(NSString *)callbackId {
     dispatch_async(dispatch_get_main_queue(), ^{
         EmbeddedWebViewInstance *instance = self.instances[instanceId];
         if (!instance) {
-            if (sendCallback) {
-                CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
-                                                            messageAsString:[NSString stringWithFormat:@"No WebView to destroy for id=%@", instanceId]];
-                [self.commandDelegate sendPluginResult:result callbackId:callbackId];
-            }
-            return;
+             if (sendCallback) [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:callbackId];
+             return;
         }
-
+        
         if (instance.webView) {
-            @try {
-                [instance.webView removeObserver:self forKeyPath:@"estimatedProgress"];
-            } @catch (NSException *ex) {
-                // ignore if observer not attached
-            }
+            @try { [instance.webView removeObserver:self forKeyPath:@"estimatedProgress"]; } @catch(NSException *e){}
             [instance.webView stopLoading];
             [instance.webView removeFromSuperview];
             instance.webView.navigationDelegate = nil;
             instance.webView.UIDelegate = nil;
             instance.webView = nil;
         }
-
-        if (instance.progressBar) {
-            [instance.progressBar removeFromSuperview];
-            instance.progressBar = nil;
-        }
-
-        if (instance.container) {
-            [instance.container removeFromSuperview];
-            instance.container = nil;
-        }
-
+        [instance.progressBar removeFromSuperview];
+        [instance.container removeFromSuperview];
         [self.instances removeObjectForKey:instanceId];
-
-        if ([self.lastCreatedId isEqualToString:instanceId]) {
-            self.lastCreatedId = self.instances.allKeys.firstObject;
-        }
-
-        NSLog(@"[EmbeddedWebView] WebView destroyed (id=%@)", instanceId);
-
+        
         if (sendCallback) {
-            CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
-                                                        messageAsString:[NSString stringWithFormat:@"WebView destroyed (id=%@)", instanceId]];
-            [self.commandDelegate sendPluginResult:result callbackId:callbackId];
+            [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:@"Destroyed"] callbackId:callbackId];
         }
     });
 }
+
 
 - (void)destroyAllInstances {
     NSArray<NSString *> *keys = [self.instances.allKeys copy];
