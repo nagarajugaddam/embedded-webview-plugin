@@ -243,6 +243,35 @@
                     }
                 }
 
+                if (instance.cookies.count > 0) {
+                    WKHTTPCookieStore *cookieStore =
+                        WKWebsiteDataStore.defaultDataStore.httpCookieStore;
+
+                    NSURL *pageURL = [NSURL URLWithString:url];
+
+                    for (NSString *name in instance.cookies) {
+                        NSString *value = [[instance.cookies[name] description] copy];
+
+                        NSMutableDictionary *props = [@{
+                            NSHTTPCookieName: name,
+                            NSHTTPCookieValue: value,
+                            NSHTTPCookieDomain: pageURL.host,
+                            NSHTTPCookiePath: @"/",
+                            NSHTTPCookieSecure: @"TRUE"
+                        } mutableCopy];
+
+                        if (@available(iOS 13.0, *)) {
+                            props[NSHTTPCookieSameSitePolicy] = NSHTTPCookieSameSiteLax;
+                        }
+
+                        NSHTTPCookie *cookie =
+                            [NSHTTPCookie cookieWithProperties:props];
+
+                        [cookieStore setCookie:cookie completionHandler:nil];
+                    }
+                }
+
+
                 [webView loadRequest:request];
 
                 // Save instance
@@ -621,18 +650,18 @@
             });
         }
 
-        if (instance.cookies.count > 0) {
-            for (NSString *name in instance.cookies) {
-                NSString *val = [[instance.cookies[name] description]
-                    stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
+        // if (instance.cookies.count > 0) {
+        //     for (NSString *name in instance.cookies) {
+        //         NSString *val = [[instance.cookies[name] description]
+        //             stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
 
-                NSString *js =
-                    [NSString stringWithFormat:@"document.cookie='%@=%@; path=/';",
-                    name, val];
+        //         NSString *js =
+        //             [NSString stringWithFormat:@"document.cookie='%@=%@; path=/';",
+        //             name, val];
 
-                [webView evaluateJavaScript:js completionHandler:nil];
-            }
-        }
+        //         [webView evaluateJavaScript:js completionHandler:nil];
+        //     }
+        // }
 
         // Smooth scrolling CSS
         NSString *css = @"html, body { scroll-behavior: smooth !important; -webkit-overflow-scrolling: touch; }";
