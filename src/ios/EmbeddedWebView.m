@@ -150,6 +150,30 @@
                 config.preferences.javaScriptCanOpenWindowsAutomatically = YES;
                 config.preferences.javaScriptEnabled = YES;
 
+                 // ---------------------------------------------------------
+                // START FIX: Inject Cookies for JavaScript (Document Start)
+                // ---------------------------------------------------------
+                if (instance.cookies && instance.cookies.count > 0) {
+                    NSMutableString *cookieJs = [NSMutableString string];
+                    
+                    for (NSString *name in instance.cookies) {
+                        NSString *value = [[instance.cookies[name] description] stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
+                        // We strictly set path=/ to ensure visibility. 
+                        // You can optionally add domain logic here if needed.
+                        [cookieJs appendFormat:@"document.cookie='%@=%@; path=/';", name, value];
+                    }
+                    
+                    WKUserScript *cookieScript = [[WKUserScript alloc] 
+                        initWithSource:cookieJs
+                        injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                        forMainFrameOnly:NO];
+                        
+                    [config.userContentController addUserScript:cookieScript];
+                }
+                // ---------------------------------------------------------
+                // END FIX
+                // ---------------------------------------------------------
+
                 if ([options[@"enableZoom"] boolValue]) {
                     NSString *viewport = @"var meta = document.createElement('meta'); meta.name = 'viewport'; meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes'; document.getElementsByTagName('head')[0].appendChild(meta);";
                     WKUserScript *script = [[WKUserScript alloc] initWithSource:viewport
@@ -242,6 +266,24 @@
                         [request setValue:headers[key] forHTTPHeaderField:key];
                     }
                 }
+
+                 // ---------------------------------------------------------
+                // START FIX: Manually set Cookie header for initial request
+                // ---------------------------------------------------------
+                if (instance.cookies && instance.cookies.count > 0) {
+                    NSMutableString *cookieHeader = [NSMutableString string];
+                    for (NSString *name in instance.cookies) {
+                        NSString *value = [instance.cookies[name] description];
+                        if (cookieHeader.length > 0) {
+                            [cookieHeader appendString:@"; "];
+                        }
+                        [cookieHeader appendFormat:@"%@=%@", name, value];
+                    }
+                    [request setValue:cookieHeader forHTTPHeaderField:@"Cookie"];
+                }
+                // ---------------------------------------------------------
+                // END FIX
+                // ---------------------------------------------------------
 
                 WKHTTPCookieStore *cookieStore =
                         WKWebsiteDataStore.defaultDataStore.httpCookieStore;
