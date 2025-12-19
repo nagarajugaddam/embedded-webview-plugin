@@ -136,6 +136,7 @@
 
                 // Configure WKWebView
                 WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
+                config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
                 config.allowsInlineMediaPlayback = YES;
 
                 if (@available(iOS 10.0, *)) {
@@ -243,7 +244,14 @@
                     }
                 }
 
-                [webView loadRequest:request];
+               NSURL *requestURL = [NSURL URLWithString:url];
+
+                [self applyCookies:instance.cookies
+                            forURL:requestURL
+                    configuration:config
+                        completion:^{
+                            [webView loadRequest:request];
+                        }];
 
                 // Save instance
                 self.instances[instanceId] = instance;
@@ -264,6 +272,57 @@
         });
     }];
 }
+
+- (void)applyCookies:(NSDictionary *)cookies
+              forURL:(NSURL *)url
+       configuration:(WKWebViewConfiguration *)config
+           completion:(void (^)(void))completion {
+
+    if (!cookies || cookies.count == 0) {
+        completion();
+        return;
+    }
+
+    WKHTTPCookieStore *cookieStore = config.websiteDataStore.httpCookieStore;
+    dispatch_group_t group = dispatch_group_create();
+
+    BOOL isSecure = [url.scheme.lowercaseString isEqualToString:@"https"];
+    NSString *domain = url.host;
+
+    if (![domain hasPrefix:@"."]) {
+        domain = [@"." stringByAppendingString:domain];
+    }
+
+    for (NSString *name in cookies) {
+        NSString *value = [cookies[name] description];
+
+        dispatch_group_enter(group);
+
+        NSMutableDictionary *props = @{
+            NSHTTPCookieName: name,
+            NSHTTPCookieValue: value,
+            NSHTTPCookieDomain: domain,
+            NSHTTPCookiePath: @"/",
+            NSHTTPCookieSameSitePolicy: NSHTTPCookieSameSiteNone
+        }.mutableCopy;
+
+        if (isSecure) {
+            props[NSHTTPCookieSecure] = @"TRUE";
+        }
+
+        NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:props];
+
+        [cookieStore setCookie:cookie completionHandler:^{
+            dispatch_group_leave(group);
+        }];
+    }
+
+    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+        NSLog(@"[EmbeddedWebView] Cookies injected before page load");
+        completion();
+    });
+}
+
 
 #pragma mark - Destroy
 
@@ -621,18 +680,7 @@
             });
         }
 
-        if (instance.cookies.count > 0) {
-            for (NSString *name in instance.cookies) {
-                NSString *val = [[instance.cookies[name] description]
-                    stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
-
-                NSString *js =
-                    [NSString stringWithFormat:@"document.cookie='%@=%@; path=/';",
-                    name, val];
-
-                [webView evaluateJavaScript:js completionHandler:nil];
-            }
-        }
+       
 
         // Smooth scrolling CSS
         NSString *css = @"html, body { scroll-behavior: smooth !important; -webkit-overflow-scrolling: touch; }";
