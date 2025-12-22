@@ -113,7 +113,7 @@
     [self.commandDelegate runInBackground:^{
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
-                // ... (Layout Calculation Code remains the same) ...
+                // --- Layout Calculations ---
                 NSNumber *topOffset = options[@"top"] ?: @0;
                 NSNumber *bottomOffset = options[@"bottom"] ?: @0;
                 CGFloat safeTop = 0;
@@ -127,18 +127,16 @@
                 }
                 CGFloat finalTopMargin = safeTop + [topOffset floatValue];
                 CGFloat finalBottomMargin = safeBottom + [bottomOffset floatValue];
-                // ... (End Layout Calculation) ...
 
                 instance.container = [[UIView alloc] init];
                 instance.container.backgroundColor = [UIColor clearColor];
 
-                // Configure WKWebView
+                // --- Configure WKWebView ---
                 WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
                 
-                // -----------------------------------------------------------------------
-                // FIX 2: ASSIGN SHARED POOL & DATA STORE
-                // -----------------------------------------------------------------------
+                // 1. Shared Process Pool (Crucial for session sharing)
                 config.processPool = [EmbeddedWebView sharedProcessPool];
+                // 2. Persistent Data Store
                 config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
 
                 config.allowsInlineMediaPlayback = YES;
@@ -148,13 +146,11 @@
                     config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
                 }
 
-                // JS COOKIE INJECTION (FALLBACK)
+                // --- JS Cookie Injection (Backup for document.cookie access) ---
                 if (instance.cookies && instance.cookies.count > 0) {
                     NSMutableString *cookieJs = [NSMutableString string];
                     for (NSString *name in instance.cookies) {
-                        // FIX: Better escaping for values
                         NSString *rawVal = [instance.cookies[name] description];
-                        // Basic escaping for single quotes
                         NSString *val = [rawVal stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
                         [cookieJs appendFormat:@"document.cookie='%@=%@; path=/';", name, val];
                     }
@@ -232,76 +228,82 @@
                     }
                 }
 
-                // HEADER COOKIE INJECTION (INITIAL REQUEST ONLY)
+                // --- MANUAL HEADER INJECTION (The Safety Net) ---
+                // This ensures cookies are sent even if the Async Store hasn't fully synced for the FIRST packet.
                 if (instance.cookies && instance.cookies.count > 0) {
                     NSMutableString *cookieHeader = [NSMutableString string];
                     for (NSString *name in instance.cookies) {
+                        NSString *val = [instance.cookies[name] description];
+                        // Basic URL encoding for headers to prevent breaking HTTP format
+                        NSString *escapedVal = [val stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
                         if (cookieHeader.length > 0) [cookieHeader appendString:@"; "];
-                        [cookieHeader appendFormat:@"%@=%@", name, instance.cookies[name]];
+                        [cookieHeader appendFormat:@"%@=%@", name, escapedVal];
                     }
                     [request setValue:cookieHeader forHTTPHeaderField:@"Cookie"];
                 }
 
-                // -----------------------------------------------------------------------
-                // FIX 3: ASYNC STORE SETTER (WAIT LOGIC)
-                // -----------------------------------------------------------------------
+                // --- ASYNC COOKIE STORE SETTER (The Persistent Fix) ---
                 WKHTTPCookieStore *cookieStore = config.websiteDataStore.httpCookieStore;
                 NSURL *pageURL = [NSURL URLWithString:url];
+                NSString *rawHost = pageURL.host;
                 
-                // Safety check: if URL is invalid, host is nil, cookies fail.
-                NSString *domain = pageURL.host ?: @"";
+                // Logic: if host is "www.example.com", try to set cookie for ".example.com"
+                // so it works on "api.example.com" too.
+                NSString *cookieDomain = rawHost;
+                if ([rawHost hasPrefix:@"www."]) {
+                    cookieDomain = [rawHost substringFromIndex:3]; // becomes .example.com
+                }
 
                 NSArray *cookieKeys = instance.cookies ? instance.cookies.allKeys : @[];
-                __block NSInteger pendingCookies = cookieKeys.count;
+                
+                // Use Dispatch Group to ensure ALL cookies are set before loading
+                dispatch_group_t cookieGroup = dispatch_group_create();
 
-                void (^startLoad)(void) = ^{
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [webView loadRequest:request];
-                    });
-                };
+                for (NSString *name in cookieKeys) {
+                    dispatch_group_enter(cookieGroup);
+                    
+                    NSString *value = [[instance.cookies[name] description] copy];
+                    
+                    NSMutableDictionary *props = [NSMutableDictionary dictionary];
+                    props[NSHTTPCookieName] = name;
+                    props[NSHTTPCookieValue] = value;
+                    props[NSHTTPCookiePath] = @"/";
+                    
+                    if (cookieDomain.length > 0) {
+                        props[NSHTTPCookieDomain] = cookieDomain;
+                    }
+                    
+                    // Force session only (or use Expires if passed from JS, but here we assume session)
+                    // props[NSHTTPCookieDiscard] = @"TRUE";
+                    
+                    // Important for iOS 13+
+                    if (@available(iOS 13.0, *)) {
+                        props[NSHTTPCookieSameSitePolicy] = NSHTTPCookieSameSiteLax;
+                    }
 
-                if (pendingCookies == 0) {
-                    startLoad();
-                } else {
-                    for (NSString *name in cookieKeys) {
-                        NSString *value = [[instance.cookies[name] description] copy];
-                        
-                        NSMutableDictionary *props = [NSMutableDictionary dictionary];
-                        props[NSHTTPCookieName] = name;
-                        props[NSHTTPCookieValue] = value;
-                        props[NSHTTPCookiePath] = @"/";
-                        
-                        // IMPORTANT: Only set domain if we have one. 
-                        // If domain is nil, iOS treats it as "Host Only" which is safer for ad-hoc loading.
-                        if (domain.length > 0) {
-                            props[NSHTTPCookieDomain] = domain;
-                        }
-                        
-                        // IMPORTANT: Do NOT set HttpOnly if you want to read it in JS
-                        // props[NSHTTPCookieDiscard] = @"FALSE"; // Optional: keep across session
-
-                        if (@available(iOS 13.0, *)) {
-                            props[NSHTTPCookieSameSitePolicy] = NSHTTPCookieSameSiteLax;
-                        }
-
-                        NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:props];
-                        
+                    NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:props];
+                    
+                    if (cookie) {
                         [cookieStore setCookie:cookie completionHandler:^{
-                            pendingCookies--;
-                            if (pendingCookies <= 0) {
-                                // Add a tiny delay to allow the process pool to sync
-                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                    startLoad();
-                                });
-                            }
+                            dispatch_group_leave(cookieGroup);
                         }];
+                    } else {
+                        NSLog(@"[EmbeddedWebView] Failed to create cookie: %@", name);
+                        dispatch_group_leave(cookieGroup);
                     }
                 }
 
                 self.instances[instanceId] = instance;
                 self.lastCreatedId = instanceId;
-                
-                [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:@"WebView created"] callbackId:command.callbackId];
+
+                // Wait for all cookies to be set, then Load
+                dispatch_group_notify(cookieGroup, dispatch_get_main_queue(), ^{
+                    // Tiny delay to ensure the process pool syncs internally
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        [webView loadRequest:request];
+                        [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:@"WebView created"] callbackId:command.callbackId];
+                    });
+                });
 
             } @catch (NSException *exception) {
                 NSLog(@"[EmbeddedWebView] Error: %@", exception);
@@ -310,8 +312,6 @@
         });
     }];
 }
-
-
 
 
 #pragma mark - Destroy
