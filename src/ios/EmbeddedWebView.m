@@ -84,7 +84,13 @@
     NSString *url = [command argumentAtIndex:1];
     NSDictionary *options = [command argumentAtIndex:2 withDefault:@{}];
 
+   
     EmbeddedWebViewInstance *instance = [[EmbeddedWebViewInstance alloc] init];
+     // Enable Web Inspector for iOS 16.4+
+    if (@available(iOS 16.4, *)) {
+        instance.webView.isInspectable = YES;
+    }
+
     instance.canGoBack = NO;
     instance.canGoForward = NO;
 
