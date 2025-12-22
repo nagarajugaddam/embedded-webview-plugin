@@ -538,11 +538,34 @@
 }
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+    
+    NSURL *url = navigationAction.request.URL;
+    NSString *scheme = [url.scheme lowercaseString];
+
+    // List of schemes to open externally (Phone, Mail, SMS, FaceTime, Maps)
+    if ([scheme isEqualToString:@"tel"] ||
+        [scheme isEqualToString:@"mailto"] ||
+        [scheme isEqualToString:@"sms"] ||
+        [scheme isEqualToString:@"facetime"] ||
+        [scheme isEqualToString:@"maps"]) {
+        
+        if ([[UIApplication sharedApplication] canOpenURL:url]) {
+            // Open in system app (Phone, Mail, etc.)
+            [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+        }
+        
+        // Cancel the load in the WebView so it doesn't show an error page
+        decisionHandler(WKNavigationActionPolicyCancel);
+        return;
+    }
+
+    // Handle target="_blank" (Links that want to open in a new window)
     if (navigationAction.targetFrame == nil) {
         [webView loadRequest:navigationAction.request];
         decisionHandler(WKNavigationActionPolicyCancel);
         return;
     }
+
     decisionHandler(WKNavigationActionPolicyAllow);
 }
 
@@ -611,5 +634,54 @@
 
 - (void)dispose { [self destroyAllInstances]; }
 - (void)onReset { [self destroyAllInstances]; }
+
+#pragma mark - WKUIDelegate (Alerts & Confirms)
+
+// Handles JavaScript alert('message')
+- (void)webView:(WKWebView *)webView runJavaScriptAlertPanelWithMessage:(NSString *)message initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(void))completionHandler {
+    
+    UIAlertController *alertController = [UIAlertController alertControllerWithTitle:nil
+                                                                             message:message
+                                                                      preferredStyle:UIAlertControllerStyleAlert];
+    
+    [alertController addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                        style:UIAlertActionStyleDefault
+                                                      handler:^(UIAlertAction *action) {
+        completionHandler();
+    }]];
+    
+    // Find the best view controller to present from
+    UIViewController *presentingVC = self.viewController;
+    while (presentingVC.presentedViewController) {
+        presentingVC = presentingVC.presentedViewController;
+    }
+    [presentingVC presentViewController:alertController animated:YES completion:nil];
+}
+
+// Handles JavaScript confirm('message')
+- (void)webView:(WKWebView *)webView runJavaScriptConfirmPanelWithMessage:(NSString *)message initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(BOOL))completionHandler {
+    
+    UIAlertController *alertController = [UIAlertController alertControllerWithTitle:nil
+                                                                             message:message
+                                                                      preferredStyle:UIAlertControllerStyleAlert];
+    
+    [alertController addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                                        style:UIAlertActionStyleCancel
+                                                      handler:^(UIAlertAction *action) {
+        completionHandler(NO);
+    }]];
+    
+    [alertController addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                        style:UIAlertActionStyleDefault
+                                                      handler:^(UIAlertAction *action) {
+        completionHandler(YES);
+    }]];
+    
+    UIViewController *presentingVC = self.viewController;
+    while (presentingVC.presentedViewController) {
+        presentingVC = presentingVC.presentedViewController;
+    }
+    [presentingVC presentViewController:alertController animated:YES completion:nil];
+}
 
 @end
