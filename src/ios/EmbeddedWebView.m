@@ -86,10 +86,11 @@
 
    
     EmbeddedWebViewInstance *instance = [[EmbeddedWebViewInstance alloc] init];
-     // Enable Web Inspector for iOS 16.4+
+    
     if (@available(iOS 16.4, *)) {
-        instance.webView.isInspectable = YES;
+        instance.webView.inspectable = YES; 
     }
+
 
     instance.canGoBack = NO;
     instance.canGoForward = NO;
