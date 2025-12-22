@@ -3,6 +3,8 @@
 #import <UIKit/UIKit.h>
 
 @interface EmbeddedWebView : CDVPlugin <WKNavigationDelegate, WKUIDelegate>
+@interface EmbeddedWebView () <WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler> 
+
 
 // Map of instanceId -> instance holder (managed in .m)
 @property (nonatomic, strong) NSMutableDictionary<NSString *, id> *instances;
@@ -19,5 +21,6 @@
 - (void)goBack:(CDVInvokedUrlCommand*)command;
 - (void)goForward:(CDVInvokedUrlCommand*)command;
 - (void)canGoBack:(CDVInvokedUrlCommand*)command;
+
 
 @end
