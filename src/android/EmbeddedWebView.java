@@ -13,11 +13,9 @@ import android.webkit.WebViewClient;
 import android.webkit.WebSettings;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
-import android.webkit.WebResourceRequest;
-import android.os.Message;
+import android.webkit.CookieManager; // Added
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.WindowInsets;
 import android.widget.FrameLayout;
 import android.widget.ProgressBar;
 import android.graphics.Color;
@@ -29,9 +27,9 @@ import java.util.Iterator;
 import java.util.Map;
 import android.graphics.Bitmap;
 import android.view.Gravity;
-import android.view.ViewParent;
 
-
+import java.net.URL; // Added
+import java.net.MalformedURLException; // Added
 
 public class EmbeddedWebView extends CordovaPlugin {
 
@@ -155,189 +153,238 @@ public class EmbeddedWebView extends CordovaPlugin {
         return instance;
     }
 
-  private void create(
-        final String id,
-        final String url,
-        final JSONObject options,
-        final CallbackContext callbackContext
-) {
+    private void create(
+            final String id,
+            final String url,
+            final JSONObject options,
+            final CallbackContext callbackContext
+    ) {
 
-    Log.d(TAG, "Creating WebView (id=" + id + ")");
+        Log.d(TAG, "Creating WebView (id=" + id + ")");
 
-    if (instances.containsKey(id)) {
-        Log.w(TAG, "WebView already exists for id=" + id + ", destroying first");
-        destroy(id, null);
+        if (instances.containsKey(id)) {
+            Log.w(TAG, "WebView already exists for id=" + id + ", destroying first");
+            destroy(id, null);
+        }
+
+        cordova.getActivity().runOnUiThread(() -> {
+            try {
+                // ----------------------------
+                // 1. Calculate Pixel Density
+                // ----------------------------
+                float density = cordova.getActivity().getResources().getDisplayMetrics().density;
+                int topOffsetDp = options.optInt("top", 0);
+                int bottomOffsetDp = options.optInt("bottom", 0);
+                int topOffsetPx = (int) (topOffsetDp * density);
+                int bottomOffsetPx = (int) (bottomOffsetDp * density);
+
+                // ----------------------------
+                // 2. Resolve Cordova Root Container
+                // ----------------------------
+                View webViewView = cordovaWebView.getView();
+                ViewGroup rootGroup = (ViewGroup) webViewView.getParent();
+
+                // ----------------------------
+                // 3. Container Setup
+                // ----------------------------
+                FrameLayout container = new FrameLayout(cordova.getActivity());
+                container.setBackgroundColor(Color.TRANSPARENT);
+
+                // ----------------------------
+                // 4. WebView Setup
+                // ----------------------------
+                WebView webView = new WebView(cordova.getActivity());
+                WebSettings settings = webView.getSettings();
+                settings.setJavaScriptEnabled(true);
+                settings.setDomStorageEnabled(true);
+                settings.setDatabaseEnabled(true);
+                settings.setAllowFileAccess(true);
+                settings.setAllowContentAccess(true);
+                settings.setLoadWithOverviewMode(true);
+                settings.setUseWideViewPort(true);
+                settings.setJavaScriptCanOpenWindowsAutomatically(true);
+                settings.setSupportMultipleWindows(true);
+
+                if (options.optBoolean("enableZoom", false)) {
+                    settings.setBuiltInZoomControls(true);
+                    settings.setDisplayZoomControls(false);
+                }
+
+                if (options.optBoolean("clearCache", false)) {
+                    webView.clearCache(true);
+                }
+
+                if (options.has("userAgent")) {
+                    settings.setUserAgentString(options.getString("userAgent"));
+                }
+
+                webView.setVerticalScrollBarEnabled(false);
+                webView.setHorizontalScrollBarEnabled(false);
+                webView.setOverScrollMode(WebView.OVER_SCROLL_NEVER);
+                webView.setBackgroundColor(Color.TRANSPARENT);
+                webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+
+                // ----------------------------
+                // 5. Calculate Cookie Domain (New Logic)
+                // ----------------------------
+                String calculatedCookieDomain = null;
+                try {
+                    URL uri = new URL(url);
+                    String host = uri.getHost();
+                    // Regex checks for IP address
+                    if (host != null && !host.equals("localhost") && !host.matches("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")) {
+                        if (host.startsWith("www.")) {
+                            host = host.substring(4);
+                        }
+                        if (!host.startsWith(".")) {
+                            calculatedCookieDomain = "." + host;
+                        } else {
+                            calculatedCookieDomain = host;
+                        }
+                    }
+                } catch (MalformedURLException e) {
+                    Log.e(TAG, "Error parsing URL for cookie domain", e);
+                }
+
+                // Final variable for inner classes
+                final String cookieDomain = calculatedCookieDomain;
+
+                // ----------------------------
+                // 6. Native Cookie Injection
+                // ----------------------------
+                CookieManager cookieManager = CookieManager.getInstance();
+                cookieManager.setAcceptCookie(true);
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                    cookieManager.setAcceptThirdPartyCookies(webView, true);
+                }
+
+                if (options.has("cookies")) {
+                    try {
+                        JSONObject cookies = options.getJSONObject("cookies");
+                        Iterator<String> keys = cookies.keys();
+                        while (keys.hasNext()) {
+                            String name = keys.next();
+                            String value = cookies.getString(name);
+                            String cookieVal = name + "=" + value + "; path=/";
+                            
+                            if (cookieDomain != null) {
+                                cookieVal += "; domain=" + cookieDomain;
+                            }
+                            
+                            cookieManager.setCookie(url, cookieVal);
+                        }
+                        // Important: Flush cookies to ensure they are available immediately
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                            cookieManager.flush();
+                        }
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error setting native cookies", e);
+                    }
+                }
+
+                // ----------------------------
+                // 7. UI Setup (Progress Bar)
+                // ----------------------------
+                ProgressBar progressBar = new ProgressBar(cordova.getActivity(), null, android.R.attr.progressBarStyleHorizontal);
+                String progressColor = options.optString("progressColor", "#2196F3");
+                try {
+                    progressBar.getProgressDrawable().setColorFilter(Color.parseColor(progressColor), PorterDuff.Mode.SRC_IN);
+                } catch (Exception ignored) {}
+
+                int progressHeightDp = options.optInt("progressHeight", 5);
+                int progressHeightPx = (int) (progressHeightDp * density);
+
+                FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        progressHeightPx,
+                        Gravity.BOTTOM
+                );
+                progressBar.setMax(100);
+                progressBar.setVisibility(View.GONE);
+
+                // ----------------------------
+                // 8. WebView Clients
+                // ----------------------------
+                webView.setWebViewClient(new WebViewClient() {
+                    @Override
+                    public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                        progressBar.setVisibility(View.VISIBLE);
+                        progressBar.setProgress(0);
+                        // Inject via JS as fallback/reinforcement
+                        injectCookies(view, options, cookieDomain);
+                        fireEvent(id, "loadStart", url);
+                    }
+
+                    @Override
+                    public void onPageFinished(WebView view, String url) {
+                        progressBar.setProgress(100);
+                        progressBar.postDelayed(() -> progressBar.setVisibility(View.GONE), 200);
+                        // Inject via JS as fallback/reinforcement
+                        injectCookies(view, options, cookieDomain);
+                        updateNavigationState(id);
+                        fireEvent(id, "loadStop", url);
+                    }
+
+                    @Override
+                    public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+                        String errorJson = "{\"url\":\"" + failingUrl + "\",\"code\":" + errorCode + ",\"message\":\"" + description + "\"}";
+                        fireEvent(id, "loadError", errorJson);
+                    }
+                });
+
+                webView.setWebChromeClient(new WebChromeClient() {
+                    @Override
+                    public void onProgressChanged(WebView view, int newProgress) {
+                        progressBar.setProgress(newProgress);
+                    }
+                });
+
+                container.addView(webView, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                ));
+                container.addView(progressBar, progressParams);
+
+                FrameLayout.LayoutParams containerParams = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                );
+
+                containerParams.topMargin = topOffsetPx;
+                containerParams.bottomMargin = bottomOffsetPx;
+
+                rootGroup.addView(container, containerParams);
+                container.bringToFront();
+
+                // ----------------------------
+                // 9. Load URL
+                // ----------------------------
+                if (options.has("headers")) {
+                    Map<String, String> headers = jsonToMap(options.getJSONObject("headers"));
+                    webView.loadUrl(url, headers);
+                } else {
+                    webView.loadUrl(url);
+                }
+
+                WebViewInstance instance = new WebViewInstance();
+                instance.webView = webView;
+                instance.container = container;
+                instance.progressBar = progressBar;
+
+                instances.put(id, instance);
+                lastCreatedId = id;
+
+                callbackContext.success("WebView created successfully for id=" + id);
+
+            } catch (Exception e) {
+                Log.e(TAG, "Error creating WebView", e);
+                callbackContext.error(e.getMessage());
+            }
+        });
     }
 
-    cordova.getActivity().runOnUiThread(() -> {
-        try {
-            // ----------------------------
-            // 1. Calculate Pixel Density
-            // ----------------------------
-            float density = cordova.getActivity().getResources().getDisplayMetrics().density;
-
-            // Get offsets from JS (these are in CSS pixels/dp)
-            int topOffsetDp = options.optInt("top", 0);
-            int bottomOffsetDp = options.optInt("bottom", 0);
-
-            // Convert to Physical Pixels for Android Layouts
-            int topOffsetPx = (int) (topOffsetDp * density);
-            int bottomOffsetPx = (int) (bottomOffsetDp * density);
-
-            Log.d(TAG, "Offsets (DP) → top=" + topOffsetDp + ", bottom=" + bottomOffsetDp);
-            Log.d(TAG, "Offsets (PX) → top=" + topOffsetPx + ", bottom=" + bottomOffsetPx);
-
-            // ----------------------------
-            // 2. Resolve Cordova Root Container
-            // ----------------------------
-            // We get the PARENT of the CordovaWebView. This is usually the main FrameLayout of the Activity.
-            // This ensures our view floats over the WebView, rather than being stuffed inside it.
-            View webViewView = cordovaWebView.getView();
-            ViewGroup rootGroup = (ViewGroup) webViewView.getParent();
-
-            // ----------------------------
-            // 3. Container Setup
-            // ----------------------------
-            FrameLayout container = new FrameLayout(cordova.getActivity());
-            container.setBackgroundColor(Color.TRANSPARENT);
-
-            // ----------------------------
-            // 4. WebView Setup (Same as your code)
-            // ----------------------------
-            WebView webView = new WebView(cordova.getActivity());
-            WebSettings settings = webView.getSettings();
-            settings.setJavaScriptEnabled(true);
-            settings.setDomStorageEnabled(true);
-            settings.setDatabaseEnabled(true);
-            settings.setAllowFileAccess(true);
-            settings.setAllowContentAccess(true);
-            settings.setLoadWithOverviewMode(true);
-            settings.setUseWideViewPort(true);
-            settings.setJavaScriptCanOpenWindowsAutomatically(true);
-            settings.setSupportMultipleWindows(true);
-
-            if (options.optBoolean("enableZoom", false)) {
-                settings.setBuiltInZoomControls(true);
-                settings.setDisplayZoomControls(false);
-            }
-
-            if (options.optBoolean("clearCache", false)) {
-                webView.clearCache(true);
-            }
-
-            if (options.has("userAgent")) {
-                settings.setUserAgentString(options.getString("userAgent"));
-            }
-
-            webView.setVerticalScrollBarEnabled(false);
-            webView.setHorizontalScrollBarEnabled(false);
-            webView.setOverScrollMode(WebView.OVER_SCROLL_NEVER);
-            webView.setBackgroundColor(Color.TRANSPARENT);
-            webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-
-            // Progress Bar Setup (Same as your code)
-            ProgressBar progressBar = new ProgressBar(cordova.getActivity(), null, android.R.attr.progressBarStyleHorizontal);
-            String progressColor = options.optString("progressColor", "#2196F3");
-            try {
-                progressBar.getProgressDrawable().setColorFilter(Color.parseColor(progressColor), PorterDuff.Mode.SRC_IN);
-            } catch (Exception ignored) {}
-
-            int progressHeightDp = options.optInt("progressHeight", 5);
-            int progressHeightPx = (int) (progressHeightDp * density); // Apply density here too
-
-            FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    progressHeightPx,
-                    Gravity.BOTTOM
-            );
-            progressBar.setMax(100);
-            progressBar.setVisibility(View.GONE);
-
-            // WebView Clients (Same as your code)
-            webView.setWebViewClient(new WebViewClient() {
-                @Override
-                public void onPageStarted(WebView view, String url, Bitmap favicon) {
-                    progressBar.setVisibility(View.VISIBLE);
-                    progressBar.setProgress(0);
-                    injectCookies(view, options);
-                    fireEvent(id, "loadStart", url);
-                }
-                @Override
-                public void onPageFinished(WebView view, String url) {
-                    progressBar.setProgress(100);
-                    progressBar.postDelayed(() -> progressBar.setVisibility(View.GONE), 200);
-                    injectCookies(view, options);
-                    updateNavigationState(id);
-                    fireEvent(id, "loadStop", url);
-                }
-                @Override
-                public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
-                    String errorJson = "{\"url\":\"" + failingUrl + "\",\"code\":" + errorCode + ",\"message\":\"" + description + "\"}";
-                    fireEvent(id, "loadError", errorJson);
-                }
-            });
-
-            webView.setWebChromeClient(new WebChromeClient() {
-                @Override
-                public void onProgressChanged(WebView view, int newProgress) {
-                    progressBar.setProgress(newProgress);
-                }
-            });
-
-            // ----------------------------
-            // 5. Assemble Hierarchy
-            // ----------------------------
-            container.addView(webView, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-            ));
-            container.addView(progressBar, progressParams);
-
-            // ----------------------------
-            // 6. Apply Margins (Using the PX values calculated earlier)
-            // ----------------------------
-            FrameLayout.LayoutParams containerParams = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-            );
-
-            containerParams.topMargin = topOffsetPx;
-            containerParams.bottomMargin = bottomOffsetPx;
-
-            // Add to the ROOT, not the webView itself
-            rootGroup.addView(container, containerParams);
-            container.bringToFront();
-
-            // ----------------------------
-            // Load URL & Save Instance
-            // ----------------------------
-            if (options.has("headers")) {
-                Map<String, String> headers = jsonToMap(options.getJSONObject("headers"));
-                webView.loadUrl(url, headers);
-            } else {
-                webView.loadUrl(url);
-            }
-
-            WebViewInstance instance = new WebViewInstance();
-            instance.webView = webView;
-            instance.container = container;
-            instance.progressBar = progressBar;
-
-            instances.put(id, instance);
-            lastCreatedId = id;
-
-            callbackContext.success("WebView created successfully for id=" + id);
-
-        } catch (Exception e) {
-            Log.e(TAG, "Error creating WebView", e);
-            callbackContext.error(e.getMessage());
-        }
-    });
-}
-
-
-
-    private void injectCookies(WebView webView, JSONObject options) {
+    // Updated to accept domain argument
+    private void injectCookies(WebView webView, JSONObject options, String domain) {
         if (options.has("cookies")) {
             try {
                 JSONObject cookies = options.getJSONObject("cookies");
@@ -348,12 +395,17 @@ public class EmbeddedWebView extends CordovaPlugin {
                     String value = cookies.getString(name);
 
                     String safeValue = value.replace("'", "\\'");
-                    String js =
-                        "document.cookie = '" + name + "=" + safeValue + "; path=/';";
+                    
+                    // Construct JS with domain if available
+                    String js = "document.cookie = '" + name + "=" + safeValue + "; path=/";
+                    if (domain != null) {
+                        js += "; domain=" + domain;
+                    }
+                    js += "';";
 
                     webView.evaluateJavascript(js, null);
-                    Log.d(TAG, "JS cookie injected: " + name);
                 }
+                Log.d(TAG, "JS cookies injected with domain: " + domain);
             } catch (Exception e) {
                 Log.e(TAG, "JS cookie injection failed", e);
             }
@@ -570,10 +622,6 @@ public class EmbeddedWebView extends CordovaPlugin {
         });
     }
 
-    /**
-     * Per-instance event firing:
-     * JS event name: embeddedwebview.<id>.<eventName>
-     */
     private void fireEvent(String id, String eventName, String data) {
         try {
             String payload;
@@ -589,8 +637,6 @@ public class EmbeddedWebView extends CordovaPlugin {
 
             String js = "javascript:cordova.fireDocumentEvent('" + fullEventName + "', " +
                     "{detail: " + payload + "});";
-
-            Log.d(TAG, "Firing event: " + fullEventName + " with data: " + data);
 
             cordova.getActivity().runOnUiThread(() -> {
                 cordovaWebView.getView().post(() -> {
