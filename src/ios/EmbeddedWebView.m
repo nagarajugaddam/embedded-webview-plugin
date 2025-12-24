@@ -18,6 +18,7 @@
 @property (nonatomic, assign) BOOL canGoBack;
 @property (nonatomic, assign) BOOL canGoForward;
 @property (nonatomic, strong) NSDictionary *cookies;
+@property (nonatomic, strong) NSArray *blockedUrls; // <--- ADDED THIS
 @end
 
 @implementation EmbeddedWebViewInstance
@@ -25,14 +26,12 @@
 
 #pragma mark - Plugin Interface
 
-// Define the class extension with Protocols AND Private Method Signatures
 @interface EmbeddedWebView () <WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler>
 
 @property (nonatomic, strong) NSMutableDictionary *instances;
 @property (nonatomic, strong) NSString *lastCreatedId;
 @property (nonatomic, strong) NSString *currentCallbackId;
 
-// --- CRITICAL FIX: Declare private methods here to prevent build errors ---
 - (EmbeddedWebViewInstance *)instanceForId:(NSString *)instanceId command:(CDVInvokedUrlCommand *)command;
 - (NSString *)instanceIdForWebView:(WKWebView *)webView;
 - (void)destroyInstanceWithId:(NSString *)instanceId sendCallback:(BOOL)sendCallback callbackId:(NSString *)callbackId;
@@ -45,7 +44,6 @@
 
 @implementation EmbeddedWebView
 
-// Shared Process Pool (Singleton)
 + (WKProcessPool *)sharedProcessPool {
     static WKProcessPool *_sharedPool = nil;
     static dispatch_once_t onceToken;
@@ -106,6 +104,11 @@
     if ([options[@"cookies"] isKindOfClass:[NSDictionary class]]) {
         instance.cookies = options[@"cookies"];
     }
+    
+    // --- LOAD BLOCKED URLS ---
+    if ([options[@"blockedUrls"] isKindOfClass:[NSArray class]]) {
+        instance.blockedUrls = options[@"blockedUrls"];
+    }
 
     if (!instanceId || instanceId.length == 0) {
         CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
@@ -152,7 +155,7 @@
                 config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
                 config.allowsInlineMediaPlayback = YES;
                 
-                // --- LOGGING BRIDGE ---
+                // Logging
                 NSString *debugScript =
                     @"window.onerror = function(msg, url, line) { window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-fatal', msg: msg, line: line, url: url}); };"
                     @"var origLog = console.log; console.log = function() { origLog.apply(console, arguments); var msg = Array.from(arguments).join(' '); window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-log', msg: msg}); };"
@@ -162,17 +165,14 @@
                 WKUserScript *debugUserScript = [[WKUserScript alloc] initWithSource:debugScript injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
                 [config.userContentController addUserScript:debugUserScript];
                 
-                // Register Handler
                 [config.userContentController addScriptMessageHandler:self name:@"consoleHandler"];
                 
-                // --- CALCULATE COOKIE DOMAIN (Moved Up) ---
-                // We calculate this early so both JS injection and Native Cookie Store use the exact same domain logic.
+                // Cookie Logic
                 NSURL *pageURL = [NSURL URLWithString:url];
                 NSString *rawHost = pageURL.host;
                 NSString *cookieDomain = nil;
                 
                 if (rawHost && ![rawHost isEqualToString:@"localhost"]) {
-                    // Check if it's an IP address
                     NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$" options:0 error:nil];
                     NSUInteger numberOfMatches = [regex numberOfMatchesInString:rawHost options:0 range:NSMakeRange(0, [rawHost length])];
                     
@@ -181,8 +181,6 @@
                         if ([cleanHost hasPrefix:@"www."]) {
                             cleanHost = [cleanHost substringFromIndex:4];
                         }
-                        
-                        // force add dot if not present to support subdomains
                         if (![cleanHost hasPrefix:@"."]) {
                             cookieDomain = [NSString stringWithFormat:@".%@", cleanHost];
                         } else {
@@ -191,14 +189,12 @@
                     }
                 }
                 
-                // Cookie Script Injection (Backup)
                 if (instance.cookies && instance.cookies.count > 0) {
                     NSMutableString *cookieJs = [NSMutableString string];
                     for (NSString *name in instance.cookies) {
                         NSString *rawVal = [instance.cookies[name] description];
                         NSString *val = [rawVal stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
                         
-                        // Modified to include Domain
                         if (cookieDomain) {
                             [cookieJs appendFormat:@"document.cookie='%@=%@; domain=%@; path=/';", name, val, cookieDomain];
                         } else {
@@ -226,7 +222,6 @@
                 webView.backgroundColor = [UIColor clearColor];
                 webView.opaque = NO;
                 
-                // Safe Inspectable check
                 if (@available(iOS 16.4, *)) {
                     @try { [webView setValue:@YES forKey:@"inspectable"]; } @catch (NSException *e) {}
                 }
@@ -242,7 +237,6 @@
 
                 [webView addObserver:self forKeyPath:@"estimatedProgress" options:NSKeyValueObservingOptionNew context:nil];
 
-                // UI Layout
                 UIProgressView *progressBar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
                 instance.progressBar = progressBar;
                 progressBar.progressTintColor = [self colorFromHexString:options[@"progressColor"] ?: @"#2196F3"];
@@ -292,10 +286,9 @@
                     [request setValue:cookieHeader forHTTPHeaderField:@"Cookie"];
                 }
 
-                // Cookie Store - Native
+                // Native Cookie Store
                 WKHTTPCookieStore *cookieStore = config.websiteDataStore.httpCookieStore;
                 BOOL isSecure = [url.lowercaseString hasPrefix:@"https"];
-                
                 NSArray *cookieKeys = instance.cookies ? instance.cookies.allKeys : @[];
                 dispatch_group_t cookieGroup = dispatch_group_create();
 
@@ -306,10 +299,7 @@
                     props[NSHTTPCookieName] = name;
                     props[NSHTTPCookieValue] = value;
                     props[NSHTTPCookiePath] = @"/";
-                    
-                    // Apply the pre-calculated domain (e.g. .aut.amu.apus.edu)
                     if (cookieDomain) props[NSHTTPCookieDomain] = cookieDomain;
-                    
                     if (isSecure) props[NSHTTPCookieSecure] = @"TRUE";
                     if (@available(iOS 13.0, *)) {
                         props[NSHTTPCookieSameSitePolicy] = NSHTTPCookieSameSiteLax;
@@ -342,7 +332,9 @@
     }];
 }
 
-#pragma mark - Destroy
+// ... [Destroy, loadUrl, executeScript, etc. REMAIN UNCHANGED] ...
+// (Omitting standard methods to save space, assuming they are unchanged from previous versions)
+// Just ensure you copy the methods from your previous working file.
 
 - (void)destroy:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
@@ -361,7 +353,6 @@
         if (instance.webView) {
             @try { [instance.webView removeObserver:self forKeyPath:@"estimatedProgress"]; } @catch(NSException *e){}
             @try { [instance.webView.configuration.userContentController removeScriptMessageHandlerForName:@"consoleHandler"]; } @catch(NSException *e){}
-            
             [instance.webView stopLoading];
             [instance.webView removeFromSuperview];
             instance.webView.navigationDelegate = nil;
@@ -377,7 +368,6 @@
         }
     });
 }
-
 - (void)destroyAllInstances {
     NSArray<NSString *> *keys = [self.instances.allKeys copy];
     for (NSString *instanceId in keys) {
@@ -386,20 +376,14 @@
     [self.instances removeAllObjects];
     self.lastCreatedId = nil;
 }
-
-#pragma mark - Methods
-
 - (void)loadUrl:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     NSString *url = [command argumentAtIndex:1];
     NSDictionary *headers = [command argumentAtIndex:2 withDefault:nil];
-
     if (!instanceId) return;
-
     dispatch_async(dispatch_get_main_queue(), ^{
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
         if (!instance) return;
-
         @try {
             NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
             if (headers) {
@@ -412,16 +396,13 @@
         }
     });
 }
-
 - (void)executeScript:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     NSString *script = [command argumentAtIndex:1];
     if (!instanceId || !script) return;
-
     dispatch_async(dispatch_get_main_queue(), ^{
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
         if (!instance) return;
-
         [instance.webView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
             NSString *res = result ? [NSString stringWithFormat:@"%@", result] : @"";
             if(error) res = error.localizedDescription;
@@ -429,7 +410,6 @@
         }];
     });
 }
-
 - (void)setVisible:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     BOOL visible = [[command argumentAtIndex:1] boolValue];
@@ -441,7 +421,6 @@
         }
     });
 }
-
 - (void)reload:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -452,7 +431,6 @@
         }
     });
 }
-
 - (void)goBack:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -463,7 +441,6 @@
         }
     });
 }
-
 - (void)goForward:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -474,7 +451,6 @@
         }
     });
 }
-
 - (void)canGoBack:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -484,9 +460,6 @@
         }
     });
 }
-
-#pragma mark - Log Handler
-
 - (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
     if ([message.name isEqualToString:@"consoleHandler"]) {
         NSDictionary *body = message.body;
@@ -500,7 +473,56 @@
     }
 }
 
-#pragma mark - WKNavigationDelegate
+#pragma mark - WKNavigationDelegate (UPDATED)
+
+- (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+    
+    NSString *instanceId = [self instanceIdForWebView:webView];
+    NSURL *url = navigationAction.request.URL;
+    NSString *urlString = url.absoluteString;
+    NSString *scheme = [url.scheme lowercaseString];
+
+    // --- BLOCKED URLS CHECK ---
+    if (instanceId) {
+        EmbeddedWebViewInstance *instance = self.instances[instanceId];
+        if (instance.blockedUrls && instance.blockedUrls.count > 0) {
+            for (NSString *blocked in instance.blockedUrls) {
+                // Check if the URL contains the blocked string
+                if ([urlString containsString:blocked]) {
+                    NSLog(@"[EmbeddedWebView] Navigation blocked for: %@", urlString);
+                    // Fire event so JS knows it was blocked
+                    [self fireEvent:@"loadBlocked" forInstanceId:instanceId withData:urlString];
+                    decisionHandler(WKNavigationActionPolicyCancel);
+                    return;
+                }
+            }
+        }
+    }
+    // --------------------------
+
+    if ([scheme isEqualToString:@"tel"] ||
+        [scheme isEqualToString:@"mailto"] ||
+        [scheme isEqualToString:@"sms"] ||
+        [scheme isEqualToString:@"facetime"] ||
+        [scheme isEqualToString:@"maps"]) {
+        
+        if ([[UIApplication sharedApplication] canOpenURL:url]) {
+            [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+        }
+        decisionHandler(WKNavigationActionPolicyCancel);
+        return;
+    }
+
+    if (navigationAction.targetFrame == nil) {
+        [webView loadRequest:navigationAction.request];
+        decisionHandler(WKNavigationActionPolicyCancel);
+        return;
+    }
+
+    decisionHandler(WKNavigationActionPolicyAllow);
+}
+
+// ... [Remainder of file: webView creation delegate, observeValue, helpers, etc. remain unchanged]
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationResponse:(WKNavigationResponse *)navigationResponse decisionHandler:(void (^)(WKNavigationResponsePolicy))decisionHandler {
     if ([navigationResponse.response isKindOfClass:[NSHTTPURLResponse class]]) {
@@ -515,7 +537,6 @@
     }
     decisionHandler(WKNavigationResponsePolicyAllow);
 }
-
 - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *instanceId = [self instanceIdForWebView:webView];
@@ -527,7 +548,6 @@
         }
     });
 }
-
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *instanceId = [self instanceIdForWebView:webView];
@@ -540,15 +560,12 @@
         }
     });
 }
-
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
     [self handleLoadError:error webView:webView];
 }
-
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {
     [self handleLoadError:error webView:webView];
 }
-
 - (void)handleLoadError:(NSError *)error webView:(WKWebView *)webView {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *instanceId = [self instanceIdForWebView:webView];
@@ -557,46 +574,12 @@
         if (instanceId) [self fireEvent:@"loadError" forInstanceId:instanceId withData:errorData];
     });
 }
-
-- (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
-    
-    NSURL *url = navigationAction.request.URL;
-    NSString *scheme = [url.scheme lowercaseString];
-
-    // List of schemes to open externally (Phone, Mail, SMS, FaceTime, Maps)
-    if ([scheme isEqualToString:@"tel"] ||
-        [scheme isEqualToString:@"mailto"] ||
-        [scheme isEqualToString:@"sms"] ||
-        [scheme isEqualToString:@"facetime"] ||
-        [scheme isEqualToString:@"maps"]) {
-        
-        if ([[UIApplication sharedApplication] canOpenURL:url]) {
-            // Open in system app (Phone, Mail, etc.)
-            [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
-        }
-        
-        // Cancel the load in the WebView so it doesn't show an error page
-        decisionHandler(WKNavigationActionPolicyCancel);
-        return;
-    }
-
-    // Handle target="_blank" (Links that want to open in a new window)
-    if (navigationAction.targetFrame == nil) {
-        [webView loadRequest:navigationAction.request];
-        decisionHandler(WKNavigationActionPolicyCancel);
-        return;
-    }
-
-    decisionHandler(WKNavigationActionPolicyAllow);
-}
-
 - (WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration forNavigationAction:(WKNavigationAction *)navigationAction windowFeatures:(WKWindowFeatures *)windowFeatures {
     if (navigationAction.request && navigationAction.targetFrame == nil) {
         dispatch_async(dispatch_get_main_queue(), ^{ [webView loadRequest:navigationAction.request]; });
     }
     return nil;
 }
-
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context {
     if ([keyPath isEqualToString:@"estimatedProgress"]) {
         WKWebView *webView = (WKWebView *)object;
@@ -611,16 +594,11 @@
         [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
     }
 }
-
-#pragma mark - Helpers
-
 - (void)updateNavigationStateForInstanceId:(NSString *)instanceId {
     EmbeddedWebViewInstance *instance = self.instances[instanceId];
     if (!instance || !instance.webView) return;
-
     BOOL newCanGoBack = [instance.webView canGoBack];
     BOOL newCanGoForward = [instance.webView canGoForward];
-
     if (newCanGoBack != instance.canGoBack) {
         instance.canGoBack = newCanGoBack;
         [self fireEvent:@"canGoBackChanged" forInstanceId:instanceId withData:instance.canGoBack ? @"true" : @"false"];
@@ -632,7 +610,6 @@
     NSString *navState = [NSString stringWithFormat:@"{\"canGoBack\":%@,\"canGoForward\":%@}", instance.canGoBack ? @"true" : @"false", instance.canGoForward ? @"true" : @"false"];
     [self fireEvent:@"navigationStateChanged" forInstanceId:instanceId withData:navState];
 }
-
 - (void)fireEvent:(NSString *)eventName forInstanceId:(NSString *)instanceId withData:(NSString *)data {
     if (!instanceId) return;
     @try {
@@ -643,7 +620,6 @@
         NSLog(@"[EmbeddedWebView] Error firing event: %@", exception.reason);
     }
 }
-
 - (UIColor *)colorFromHexString:(NSString *)hexString {
     if (!hexString || hexString.length == 0) return [UIColor blueColor];
     unsigned rgbValue = 0;
@@ -652,57 +628,21 @@
     [scanner scanHexInt:&rgbValue];
     return [UIColor colorWithRed:((rgbValue & 0xFF0000) >> 16)/255.0 green:((rgbValue & 0xFF00) >> 8)/255.0 blue:(rgbValue & 0xFF)/255.0 alpha:1.0];
 }
-
 - (void)dispose { [self destroyAllInstances]; }
 - (void)onReset { [self destroyAllInstances]; }
-
-#pragma mark - WKUIDelegate (Alerts & Confirms)
-
-// Handles JavaScript alert('message')
 - (void)webView:(WKWebView *)webView runJavaScriptAlertPanelWithMessage:(NSString *)message initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(void))completionHandler {
-    
-    UIAlertController *alertController = [UIAlertController alertControllerWithTitle:nil
-                                                                             message:message
-                                                                      preferredStyle:UIAlertControllerStyleAlert];
-    
-    [alertController addAction:[UIAlertAction actionWithTitle:@"OK"
-                                                        style:UIAlertActionStyleDefault
-                                                      handler:^(UIAlertAction *action) {
-        completionHandler();
-    }]];
-    
-    // Find the best view controller to present from
+    UIAlertController *alertController = [UIAlertController alertControllerWithTitle:nil message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alertController addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) { completionHandler(); }]];
     UIViewController *presentingVC = self.viewController;
-    while (presentingVC.presentedViewController) {
-        presentingVC = presentingVC.presentedViewController;
-    }
+    while (presentingVC.presentedViewController) { presentingVC = presentingVC.presentedViewController; }
     [presentingVC presentViewController:alertController animated:YES completion:nil];
 }
-
-// Handles JavaScript confirm('message')
 - (void)webView:(WKWebView *)webView runJavaScriptConfirmPanelWithMessage:(NSString *)message initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(BOOL))completionHandler {
-    
-    UIAlertController *alertController = [UIAlertController alertControllerWithTitle:nil
-                                                                             message:message
-                                                                      preferredStyle:UIAlertControllerStyleAlert];
-    
-    [alertController addAction:[UIAlertAction actionWithTitle:@"Cancel"
-                                                        style:UIAlertActionStyleCancel
-                                                      handler:^(UIAlertAction *action) {
-        completionHandler(NO);
-    }]];
-    
-    [alertController addAction:[UIAlertAction actionWithTitle:@"OK"
-                                                        style:UIAlertActionStyleDefault
-                                                      handler:^(UIAlertAction *action) {
-        completionHandler(YES);
-    }]];
-    
+    UIAlertController *alertController = [UIAlertController alertControllerWithTitle:nil message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alertController addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) { completionHandler(NO); }]];
+    [alertController addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) { completionHandler(YES); }]];
     UIViewController *presentingVC = self.viewController;
-    while (presentingVC.presentedViewController) {
-        presentingVC = presentingVC.presentedViewController;
-    }
+    while (presentingVC.presentedViewController) { presentingVC = presentingVC.presentedViewController; }
     [presentingVC presentViewController:alertController animated:YES completion:nil];
 }
-
 @end
