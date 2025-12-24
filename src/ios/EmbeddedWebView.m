@@ -165,13 +165,45 @@
                 // Register Handler
                 [config.userContentController addScriptMessageHandler:self name:@"consoleHandler"];
                 
+                // --- CALCULATE COOKIE DOMAIN (Moved Up) ---
+                // We calculate this early so both JS injection and Native Cookie Store use the exact same domain logic.
+                NSURL *pageURL = [NSURL URLWithString:url];
+                NSString *rawHost = pageURL.host;
+                NSString *cookieDomain = nil;
+                
+                if (rawHost && ![rawHost isEqualToString:@"localhost"]) {
+                    // Check if it's an IP address
+                    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$" options:0 error:nil];
+                    NSUInteger numberOfMatches = [regex numberOfMatchesInString:rawHost options:0 range:NSMakeRange(0, [rawHost length])];
+                    
+                    if (numberOfMatches == 0) {
+                        NSString *cleanHost = rawHost;
+                        if ([cleanHost hasPrefix:@"www."]) {
+                            cleanHost = [cleanHost substringFromIndex:4];
+                        }
+                        
+                        // force add dot if not present to support subdomains
+                        if (![cleanHost hasPrefix:@"."]) {
+                            cookieDomain = [NSString stringWithFormat:@".%@", cleanHost];
+                        } else {
+                            cookieDomain = cleanHost;
+                        }
+                    }
+                }
+                
                 // Cookie Script Injection (Backup)
                 if (instance.cookies && instance.cookies.count > 0) {
                     NSMutableString *cookieJs = [NSMutableString string];
                     for (NSString *name in instance.cookies) {
                         NSString *rawVal = [instance.cookies[name] description];
                         NSString *val = [rawVal stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
-                        [cookieJs appendFormat:@"document.cookie='%@=%@; path=/';", name, val];
+                        
+                        // Modified to include Domain
+                        if (cookieDomain) {
+                            [cookieJs appendFormat:@"document.cookie='%@=%@; domain=%@; path=/';", name, val, cookieDomain];
+                        } else {
+                            [cookieJs appendFormat:@"document.cookie='%@=%@; path=/';", name, val];
+                        }
                     }
                     WKUserScript *cookieScript = [[WKUserScript alloc]
                         initWithSource:cookieJs
@@ -260,24 +292,10 @@
                     [request setValue:cookieHeader forHTTPHeaderField:@"Cookie"];
                 }
 
-                // Cookie Store
+                // Cookie Store - Native
                 WKHTTPCookieStore *cookieStore = config.websiteDataStore.httpCookieStore;
-                NSURL *pageURL = [NSURL URLWithString:url];
-                NSString *rawHost = pageURL.host;
                 BOOL isSecure = [url.lowercaseString hasPrefix:@"https"];
                 
-                NSString *cookieDomain = nil;
-                NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$" options:0 error:nil];
-                NSUInteger numberOfMatches = [regex numberOfMatchesInString:rawHost options:0 range:NSMakeRange(0, [rawHost length])];
-                
-                if (numberOfMatches == 0 && ![rawHost isEqualToString:@"localhost"]) {
-                    if ([rawHost hasPrefix:@"www."]) {
-                        cookieDomain = [rawHost substringFromIndex:3];
-                    } else {
-                        cookieDomain = rawHost;
-                    }
-                }
-
                 NSArray *cookieKeys = instance.cookies ? instance.cookies.allKeys : @[];
                 dispatch_group_t cookieGroup = dispatch_group_create();
 
@@ -288,7 +306,10 @@
                     props[NSHTTPCookieName] = name;
                     props[NSHTTPCookieValue] = value;
                     props[NSHTTPCookiePath] = @"/";
+                    
+                    // Apply the pre-calculated domain (e.g. .aut.amu.apus.edu)
                     if (cookieDomain) props[NSHTTPCookieDomain] = cookieDomain;
+                    
                     if (isSecure) props[NSHTTPCookieSecure] = @"TRUE";
                     if (@available(iOS 13.0, *)) {
                         props[NSHTTPCookieSameSitePolicy] = NSHTTPCookieSameSiteLax;
