@@ -235,7 +235,11 @@
                     [[WKWebsiteDataStore defaultDataStore] removeDataOfTypes:types modifiedSince:[NSDate dateWithTimeIntervalSince1970:0] completionHandler:^{}];
                 }
 
+
                 [webView addObserver:self forKeyPath:@"estimatedProgress" options:NSKeyValueObservingOptionNew context:nil];
+                // --- ADD THESE LINES ---
+                [webView addObserver:self forKeyPath:@"canGoBack" options:NSKeyValueObservingOptionNew context:nil];
+                [webView addObserver:self forKeyPath:@"canGoForward" options:NSKeyValueObservingOptionNew context:nil];
 
                 UIProgressView *progressBar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
                 instance.progressBar = progressBar;
@@ -351,14 +355,21 @@
         }
         
         if (instance.webView) {
+            // --- UPDATED REMOVALS ---
             @try { [instance.webView removeObserver:self forKeyPath:@"estimatedProgress"]; } @catch(NSException *e){}
+            @try { [instance.webView removeObserver:self forKeyPath:@"canGoBack"]; } @catch(NSException *e){}
+            @try { [instance.webView removeObserver:self forKeyPath:@"canGoForward"]; } @catch(NSException *e){}
+            // ------------------------
+
             @try { [instance.webView.configuration.userContentController removeScriptMessageHandlerForName:@"consoleHandler"]; } @catch(NSException *e){}
+            
             [instance.webView stopLoading];
             [instance.webView removeFromSuperview];
             instance.webView.navigationDelegate = nil;
             instance.webView.UIDelegate = nil;
             instance.webView = nil;
         }
+        // ... rest of method ...
         [instance.progressBar removeFromSuperview];
         [instance.container removeFromSuperview];
         [self.instances removeObjectForKey:instanceId];
@@ -368,6 +379,7 @@
         }
     });
 }
+
 - (void)destroyAllInstances {
     NSArray<NSString *> *keys = [self.instances.allKeys copy];
     for (NSString *instanceId in keys) {
@@ -435,8 +447,18 @@
     NSString *instanceId = [command argumentAtIndex:0];
     dispatch_async(dispatch_get_main_queue(), ^{
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
-        if (instance && [instance.webView canGoBack]) {
-            [instance.webView goBack];
+        
+        if (instance) {
+            // 1. Stop loading if it is currently loading
+            if ([instance.webView isLoading]) {
+                [instance.webView stopLoading];
+            }
+            
+            // 2. Then go back if possible
+            if ([instance.webView canGoBack]) {
+                [instance.webView goBack];
+            }
+            
             [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
         }
     });
@@ -473,8 +495,6 @@
     }
 }
 
-#pragma mark - WKNavigationDelegate (UPDATED)
-
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     
     NSString *instanceId = [self instanceIdForWebView:webView];
@@ -498,6 +518,7 @@
             }
         }
     }
+
     // --------------------------
 
     if ([scheme isEqualToString:@"tel"] ||
@@ -590,10 +611,24 @@
                 [instance.progressBar setProgress:webView.estimatedProgress animated:YES];
             });
         }
-    } else {
+    } 
+    // --- ADD THIS BLOCK ---
+    else if ([keyPath isEqualToString:@"canGoBack"] || [keyPath isEqualToString:@"canGoForward"]) {
+        WKWebView *webView = (WKWebView *)object;
+        NSString *instanceId = [self instanceIdForWebView:webView];
+        if (instanceId) {
+            // This fires immediately when the stack changes
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self updateNavigationStateForInstanceId:instanceId];
+            });
+        }
+    } 
+    // ----------------------
+    else {
         [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
     }
 }
+
 - (void)updateNavigationStateForInstanceId:(NSString *)instanceId {
     EmbeddedWebViewInstance *instance = self.instances[instanceId];
     if (!instance || !instance.webView) return;
