@@ -312,13 +312,26 @@ public class EmbeddedWebView extends CordovaPlugin {
                         progressBar.setProgress(0);
                         injectCookies(view, options, cookieDomain);
                         fireEvent(id, "loadStart", url);
+                        
+                        // OPTIONAL: Check here too, though history might not be updated yet
+                        updateNavigationState(id); 
                     }
+
+                    @Override
+                    public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
+                        super.doUpdateVisitedHistory(view, url, isReload);
+                        // This is called immediately when the history stack changes
+                        updateNavigationState(id);
+                    }
+
                     @Override
                     public void onPageFinished(WebView view, String url) {
                         progressBar.setProgress(100);
                         progressBar.postDelayed(() -> progressBar.setVisibility(View.GONE), 200);
                         injectCookies(view, options, cookieDomain);
                         updateNavigationState(id);
+                        fireEvent(id, "loadStop", url);
+                        updateNavigationState(id); // Keep this as backup
                         fireEvent(id, "loadStop", url);
                     }
                     @Override
@@ -454,11 +467,30 @@ public class EmbeddedWebView extends CordovaPlugin {
             if (instance != null) { instance.webView.reload(); if (callbackContext != null) callbackContext.success("Reloaded"); }
         });
     }
-    private void goBack(final String id, final CallbackContext callbackContext) {
+   private void goBack(final String id, final CallbackContext callbackContext) {
         cordova.getActivity().runOnUiThread(() -> {
             WebViewInstance instance = getInstance(id, callbackContext);
-            if (instance != null && instance.webView.canGoBack()) { instance.webView.goBack(); if (callbackContext != null) callbackContext.success("Back"); }
-            else if (callbackContext != null) callbackContext.error("Cannot go back");
+            if (instance == null) return;
+
+            // 1. Force stop loading first
+            instance.webView.stopLoading();
+
+            // 2. Then navigate back
+            if (instance.webView.canGoBack()) {
+                instance.webView.goBack();
+                
+                // Small delay to allow state to settle before checking "canGoBack" again
+                instance.webView.postDelayed(() -> updateNavigationState(id), 100);
+                
+                if (callbackContext != null) {
+                    callbackContext.success("Navigated back for id=" + id);
+                }
+            } else {
+                if (callbackContext != null) {
+                    // Decide if you want to error or just success("Stopped")
+                    callbackContext.error("Cannot go back for id=" + id);
+                }
+            }
         });
     }
     private void goForward(final String id, final CallbackContext callbackContext) {
