@@ -13,8 +13,9 @@ import android.webkit.WebViewClient;
 import android.webkit.WebSettings;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
-import android.webkit.WebResourceRequest; // Added
+import android.webkit.WebResourceRequest; 
 import android.webkit.CookieManager;
+import android.webkit.ConsoleMessage; // <--- ADDED IMPORT
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
@@ -23,8 +24,8 @@ import android.graphics.Color;
 import android.graphics.PorterDuff;
 import android.util.Log;
 
-import java.util.ArrayList; // Added
-import java.util.List; // Added
+import java.util.ArrayList; 
+import java.util.List; 
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
@@ -44,7 +45,7 @@ public class EmbeddedWebView extends CordovaPlugin {
         ProgressBar progressBar;
         boolean canGoBack = false;
         boolean canGoForward = false;
-        List<String> blockedUrls; // <--- ADDED THIS
+        List<String> blockedUrls;
     }
 
     private final Map<String, WebViewInstance> instances = new HashMap<>();
@@ -61,7 +62,6 @@ public class EmbeddedWebView extends CordovaPlugin {
     @Override
     public boolean execute(String action, JSONArray args, CallbackContext callbackContext)
             throws JSONException {
-        // [Existing execute code remains the same]
         if ("create".equals(action)) {
             String id = args.getString(0);
             String url = args.getString(1);
@@ -291,14 +291,12 @@ public class EmbeddedWebView extends CordovaPlugin {
                         return false;
                     }
 
-                    // For older Android versions & basic string urls
                     @Override
                     public boolean shouldOverrideUrlLoading(WebView view, String url) {
                         if (checkBlocked(url)) return true;
                         return super.shouldOverrideUrlLoading(view, url);
                     }
 
-                    // For newer Android versions
                     @Override
                     public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                         String url = request.getUrl().toString();
@@ -310,17 +308,23 @@ public class EmbeddedWebView extends CordovaPlugin {
                     public void onPageStarted(WebView view, String url, Bitmap favicon) {
                         progressBar.setVisibility(View.VISIBLE);
                         progressBar.setProgress(0);
+                        
+                        // -------------------------------------------------------------
+                        // FIX: ResizeObserver loop completed with undelivered notifications
+                        // Inject JS immediately when page starts
+                        // -------------------------------------------------------------
+                        String resizeObserverFix = "window.addEventListener('error', function(event) { if (event.message === 'ResizeObserver loop completed with undelivered notifications.') { event.stopImmediatePropagation(); } });";
+                        view.evaluateJavascript(resizeObserverFix, null);
+                        // -------------------------------------------------------------
+
                         injectCookies(view, options, cookieDomain);
                         fireEvent(id, "loadStart", url);
-                        
-                        // OPTIONAL: Check here too, though history might not be updated yet
                         updateNavigationState(id); 
                     }
 
                     @Override
                     public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
                         super.doUpdateVisitedHistory(view, url, isReload);
-                        // This is called immediately when the history stack changes
                         updateNavigationState(id);
                     }
 
@@ -331,8 +335,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                         injectCookies(view, options, cookieDomain);
                         updateNavigationState(id);
                         fireEvent(id, "loadStop", url);
-                        updateNavigationState(id); // Keep this as backup
-                        fireEvent(id, "loadStop", url);
                     }
                     @Override
                     public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
@@ -341,11 +343,24 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
                 });
 
+                // --- 3. WEB CHROME CLIENT ---
                 webView.setWebChromeClient(new WebChromeClient() {
                     @Override
                     public void onProgressChanged(WebView view, int newProgress) {
                         progressBar.setProgress(newProgress);
                     }
+
+                    // -------------------------------------------------------------
+                    // FIX: Filter console logs on Android to prevent spam
+                    // -------------------------------------------------------------
+                    @Override
+                    public boolean onConsoleMessage(ConsoleMessage cm) {
+                        if (cm.message() != null && cm.message().contains("ResizeObserver loop")) {
+                            return true; // Return true to say "we handled it", suppressing the log
+                        }
+                        return super.onConsoleMessage(cm);
+                    }
+                    // -------------------------------------------------------------
                 });
 
                 container.addView(webView, new FrameLayout.LayoutParams(
@@ -376,7 +391,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                 instance.webView = webView;
                 instance.container = container;
                 instance.progressBar = progressBar;
-                instance.blockedUrls = blockedUrls; // Store list in instance
+                instance.blockedUrls = blockedUrls; 
 
                 instances.put(id, instance);
                 lastCreatedId = id;
@@ -412,8 +427,6 @@ public class EmbeddedWebView extends CordovaPlugin {
         }
     }
 
-    // ... [destroy, loadUrl, executeScript, setVisible, reload, etc. - UNCHANGED] ...
-    // Copy remaining methods from previous file
     private void destroy(final String id, final CallbackContext callbackContext) {
         cordova.getActivity().runOnUiThread(() -> {
             WebViewInstance instance = instances.remove(id);
@@ -472,14 +485,10 @@ public class EmbeddedWebView extends CordovaPlugin {
             WebViewInstance instance = getInstance(id, callbackContext);
             if (instance == null) return;
 
-            // 1. Force stop loading first
             instance.webView.stopLoading();
 
-            // 2. Then navigate back
             if (instance.webView.canGoBack()) {
                 instance.webView.goBack();
-                
-                // Small delay to allow state to settle before checking "canGoBack" again
                 instance.webView.postDelayed(() -> updateNavigationState(id), 100);
                 
                 if (callbackContext != null) {
@@ -487,7 +496,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                 }
             } else {
                 if (callbackContext != null) {
-                    // Decide if you want to error or just success("Stopped")
                     callbackContext.error("Cannot go back for id=" + id);
                 }
             }

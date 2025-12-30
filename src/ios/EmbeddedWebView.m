@@ -18,7 +18,7 @@
 @property (nonatomic, assign) BOOL canGoBack;
 @property (nonatomic, assign) BOOL canGoForward;
 @property (nonatomic, strong) NSDictionary *cookies;
-@property (nonatomic, strong) NSArray *blockedUrls; // <--- ADDED THIS
+@property (nonatomic, strong) NSArray *blockedUrls; 
 @end
 
 @implementation EmbeddedWebViewInstance
@@ -154,6 +154,15 @@
                 config.processPool = [EmbeddedWebView sharedProcessPool];
                 config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
                 config.allowsInlineMediaPlayback = YES;
+
+                // -----------------------------------------------------------------------
+                // FIX: ResizeObserver loop completed with undelivered notifications
+                // This injects a script to swallow the error before it hits the console/native bridge
+                // -----------------------------------------------------------------------
+                NSString *resizeObserverFix = @"window.addEventListener('error', function(event) { if (event.message === 'ResizeObserver loop completed with undelivered notifications.') { event.stopImmediatePropagation(); } });";
+                WKUserScript *resizeFixScript = [[WKUserScript alloc] initWithSource:resizeObserverFix injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
+                [config.userContentController addUserScript:resizeFixScript];
+                // -----------------------------------------------------------------------
                 
                 // Logging
                 NSString *debugScript =
@@ -237,7 +246,6 @@
 
 
                 [webView addObserver:self forKeyPath:@"estimatedProgress" options:NSKeyValueObservingOptionNew context:nil];
-                // --- ADD THESE LINES ---
                 [webView addObserver:self forKeyPath:@"canGoBack" options:NSKeyValueObservingOptionNew context:nil];
                 [webView addObserver:self forKeyPath:@"canGoForward" options:NSKeyValueObservingOptionNew context:nil];
 
@@ -336,10 +344,6 @@
     }];
 }
 
-// ... [Destroy, loadUrl, executeScript, etc. REMAIN UNCHANGED] ...
-// (Omitting standard methods to save space, assuming they are unchanged from previous versions)
-// Just ensure you copy the methods from your previous working file.
-
 - (void)destroy:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     if (!instanceId) return;
@@ -355,11 +359,9 @@
         }
         
         if (instance.webView) {
-            // --- UPDATED REMOVALS ---
             @try { [instance.webView removeObserver:self forKeyPath:@"estimatedProgress"]; } @catch(NSException *e){}
             @try { [instance.webView removeObserver:self forKeyPath:@"canGoBack"]; } @catch(NSException *e){}
             @try { [instance.webView removeObserver:self forKeyPath:@"canGoForward"]; } @catch(NSException *e){}
-            // ------------------------
 
             @try { [instance.webView.configuration.userContentController removeScriptMessageHandlerForName:@"consoleHandler"]; } @catch(NSException *e){}
             
@@ -369,7 +371,7 @@
             instance.webView.UIDelegate = nil;
             instance.webView = nil;
         }
-        // ... rest of method ...
+        
         [instance.progressBar removeFromSuperview];
         [instance.container removeFromSuperview];
         [self.instances removeObjectForKey:instanceId];
@@ -449,16 +451,12 @@
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
         
         if (instance) {
-            // 1. Stop loading if it is currently loading
             if ([instance.webView isLoading]) {
                 [instance.webView stopLoading];
             }
-            
-            // 2. Then go back if possible
             if ([instance.webView canGoBack]) {
                 [instance.webView goBack];
             }
-            
             [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
         }
     });
@@ -502,15 +500,12 @@
     NSString *urlString = url.absoluteString;
     NSString *scheme = [url.scheme lowercaseString];
 
-    // --- BLOCKED URLS CHECK ---
     if (instanceId) {
         EmbeddedWebViewInstance *instance = self.instances[instanceId];
         if (instance.blockedUrls && instance.blockedUrls.count > 0) {
             for (NSString *blocked in instance.blockedUrls) {
-                // Check if the URL contains the blocked string
                 if ([urlString containsString:blocked]) {
                     NSLog(@"[EmbeddedWebView] Navigation blocked for: %@", urlString);
-                    // Fire event so JS knows it was blocked
                     [self fireEvent:@"loadBlocked" forInstanceId:instanceId withData:urlString];
                     decisionHandler(WKNavigationActionPolicyCancel);
                     return;
@@ -518,8 +513,6 @@
             }
         }
     }
-
-    // --------------------------
 
     if ([scheme isEqualToString:@"tel"] ||
         [scheme isEqualToString:@"mailto"] ||
@@ -542,8 +535,6 @@
 
     decisionHandler(WKNavigationActionPolicyAllow);
 }
-
-// ... [Remainder of file: webView creation delegate, observeValue, helpers, etc. remain unchanged]
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationResponse:(WKNavigationResponse *)navigationResponse decisionHandler:(void (^)(WKNavigationResponsePolicy))decisionHandler {
     if ([navigationResponse.response isKindOfClass:[NSHTTPURLResponse class]]) {
@@ -612,18 +603,15 @@
             });
         }
     } 
-    // --- ADD THIS BLOCK ---
     else if ([keyPath isEqualToString:@"canGoBack"] || [keyPath isEqualToString:@"canGoForward"]) {
         WKWebView *webView = (WKWebView *)object;
         NSString *instanceId = [self instanceIdForWebView:webView];
         if (instanceId) {
-            // This fires immediately when the stack changes
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self updateNavigationStateForInstanceId:instanceId];
             });
         }
     } 
-    // ----------------------
     else {
         [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
     }
