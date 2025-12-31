@@ -155,17 +155,25 @@
                 config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
                 config.allowsInlineMediaPlayback = YES;
 
-                // FIX: ResizeObserver loop
-                NSString *resizeObserverFix = @"window.addEventListener('error', function(event) { if (event.message === 'ResizeObserver loop completed with undelivered notifications.') { event.stopImmediatePropagation(); } });";
+                // FIX 1: Add Event Listener to swallow the error (Standard Browser behavior)
+                NSString *resizeObserverFix = @"window.addEventListener('error', function(event) { if (event.message && event.message.indexOf('ResizeObserver loop') !== -1) { event.stopImmediatePropagation(); event.preventDefault(); return false; } });";
                 WKUserScript *resizeFixScript = [[WKUserScript alloc] initWithSource:resizeObserverFix injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
                 [config.userContentController addUserScript:resizeFixScript];
                 
-                // Logging
+                // FIX 2: Updated Debug Script (Logging) to IGNORE ResizeObserver errors
                 NSString *debugScript =
-                    @"window.onerror = function(msg, url, line) { window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-fatal', msg: msg, line: line, url: url}); };"
+                    @"window.onerror = function(msg, url, line) {"
+                    @"  if (msg && msg.indexOf('ResizeObserver loop') !== -1) return true;" // <-- IGNORE HERE
+                    @"  window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-fatal', msg: msg, line: line, url: url});"
+                    @"};"
                     @"var origLog = console.log; console.log = function() { origLog.apply(console, arguments); var msg = Array.from(arguments).join(' '); window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-log', msg: msg}); };"
                     @"var origWarn = console.warn; console.warn = function() { origWarn.apply(console, arguments); var msg = Array.from(arguments).join(' '); window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-warn', msg: msg}); };"
-                    @"var origErr = console.error; console.error = function() { origErr.apply(console, arguments); var msg = Array.from(arguments).join(' '); window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-error', msg: msg}); };";
+                    @"var origErr = console.error; console.error = function() {"
+                    @"  var msg = Array.from(arguments).join(' ');"
+                    @"  if (msg && msg.indexOf('ResizeObserver loop') !== -1) return;" // <-- IGNORE HERE
+                    @"  origErr.apply(console, arguments);"
+                    @"  window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-error', msg: msg});"
+                    @"};";
 
                 WKUserScript *debugUserScript = [[WKUserScript alloc] initWithSource:debugScript injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
                 [config.userContentController addUserScript:debugUserScript];

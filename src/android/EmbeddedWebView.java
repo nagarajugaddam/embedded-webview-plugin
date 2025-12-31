@@ -309,8 +309,8 @@ public class EmbeddedWebView extends CordovaPlugin {
                         progressBar.setVisibility(View.VISIBLE);
                         progressBar.setProgress(0);
                         
-                        // FIX: ResizeObserver loop
-                        String resizeObserverFix = "window.addEventListener('error', function(event) { if (event.message === 'ResizeObserver loop completed with undelivered notifications.') { event.stopImmediatePropagation(); } });";
+                        // FIX: ResizeObserver loop - Robust Swallow Script
+                        String resizeObserverFix = "window.addEventListener('error', function(event) { if (event.message && event.message.indexOf('ResizeObserver loop') !== -1) { event.stopImmediatePropagation(); event.preventDefault(); return false; } });";
                         view.evaluateJavascript(resizeObserverFix, null);
 
                         injectCookies(view, options, cookieDomain);
