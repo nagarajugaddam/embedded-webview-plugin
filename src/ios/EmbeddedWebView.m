@@ -39,6 +39,7 @@
 - (void)fireEvent:(NSString *)eventName forInstanceId:(NSString *)instanceId withData:(NSString *)data;
 - (UIColor *)colorFromHexString:(NSString *)hexString;
 - (void)handleLoadError:(NSError *)error webView:(WKWebView *)webView;
+- (NSString *)jsonStringFromDictionary:(NSDictionary *)dict; 
 
 @end
 
@@ -105,7 +106,6 @@
         instance.cookies = options[@"cookies"];
     }
     
-    // --- LOAD BLOCKED URLS ---
     if ([options[@"blockedUrls"] isKindOfClass:[NSArray class]]) {
         instance.blockedUrls = options[@"blockedUrls"];
     }
@@ -155,14 +155,10 @@
                 config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
                 config.allowsInlineMediaPlayback = YES;
 
-                // -----------------------------------------------------------------------
-                // FIX: ResizeObserver loop completed with undelivered notifications
-                // This injects a script to swallow the error before it hits the console/native bridge
-                // -----------------------------------------------------------------------
+                // FIX: ResizeObserver loop
                 NSString *resizeObserverFix = @"window.addEventListener('error', function(event) { if (event.message === 'ResizeObserver loop completed with undelivered notifications.') { event.stopImmediatePropagation(); } });";
                 WKUserScript *resizeFixScript = [[WKUserScript alloc] initWithSource:resizeObserverFix injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
                 [config.userContentController addUserScript:resizeFixScript];
-                // -----------------------------------------------------------------------
                 
                 // Logging
                 NSString *debugScript =
@@ -431,6 +427,14 @@
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
         if (instance && instance.container) {
             instance.container.hidden = !visible;
+            
+            // --- FIX: Stop video playback when hidden ---
+            if (!visible) {
+                NSString *pauseScript = @"(function(){ var v=document.querySelectorAll('video, audio'); for(var i=0;i<v.length;i++){ v[i].pause(); } })();";
+                [instance.webView evaluateJavaScript:pauseScript completionHandler:nil];
+            }
+            // ---------------------------------------------
+            
             [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
         }
     });
@@ -485,9 +489,8 @@
         NSDictionary *body = message.body;
         NSString *instanceId = [self instanceIdForWebView:message.webView];
         if (instanceId) {
-            NSString *type = body[@"type"] ?: @"unknown";
-            NSString *msg = body[@"msg"] ?: @"";
-            NSString *json = [NSString stringWithFormat:@"{\"type\":\"%@\", \"message\":\"%@\"}", type, [msg stringByReplacingOccurrencesOfString:@"\"" withString:@"\\'"]];
+            // SAFE JSON SERIALIZATION
+            NSString *json = [self jsonStringFromDictionary:body];
             [self fireEvent:@"consoleLog" forInstanceId:instanceId withData:json];
         }
     }
@@ -543,7 +546,15 @@
         if (statusCode >= 400) {
             NSString *instanceId = [self instanceIdForWebView:webView];
             NSString *url = httpResponse.URL.absoluteString;
-            NSString *errData = [NSString stringWithFormat:@"{\"url\":\"%@\", \"code\":%ld, \"message\":\"HTTP Server Error\"}", url, (long)statusCode];
+            
+            // SAFE JSON SERIALIZATION
+            NSDictionary *errDict = @{
+                @"url": url ?: [NSNull null],
+                @"code": @(statusCode),
+                @"message": @"HTTP Server Error"
+            };
+            NSString *errData = [self jsonStringFromDictionary:errDict];
+            
             if (instanceId) [self fireEvent:@"loadError" forInstanceId:instanceId withData:errData];
         }
     }
@@ -582,7 +593,15 @@
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *instanceId = [self instanceIdForWebView:webView];
         NSString *url = webView.URL.absoluteString ?: @"";
-        NSString *errorData = [NSString stringWithFormat:@"{\"url\":\"%@\",\"code\":%ld,\"message\":\"%@\"}", url, (long)error.code, error.localizedDescription];
+        
+        // SAFE JSON SERIALIZATION
+        NSDictionary *errDict = @{
+            @"url": url,
+            @"code": @(error.code),
+            @"message": error.localizedDescription ?: @"Unknown error"
+        };
+        NSString *errorData = [self jsonStringFromDictionary:errDict];
+        
         if (instanceId) [self fireEvent:@"loadError" forInstanceId:instanceId withData:errorData];
     });
 }
@@ -630,19 +649,44 @@
         instance.canGoForward = newCanGoForward;
         [self fireEvent:@"canGoForwardChanged" forInstanceId:instanceId withData:instance.canGoForward ? @"true" : @"false"];
     }
-    NSString *navState = [NSString stringWithFormat:@"{\"canGoBack\":%@,\"canGoForward\":%@}", instance.canGoBack ? @"true" : @"false", instance.canGoForward ? @"true" : @"false"];
+    
+    // SAFE JSON SERIALIZATION
+    NSDictionary *navDict = @{
+        @"canGoBack": @(instance.canGoBack),
+        @"canGoForward": @(instance.canGoForward)
+    };
+    NSString *navState = [self jsonStringFromDictionary:navDict];
     [self fireEvent:@"navigationStateChanged" forInstanceId:instanceId withData:navState];
 }
+
+// HELPER: Convert Dict to JSON String (Resolves Parse Errors)
+- (NSString *)jsonStringFromDictionary:(NSDictionary *)dict {
+    NSError *error;
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:dict options:0 error:&error];
+    if (!jsonData) return @"{}";
+    return [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+}
+
 - (void)fireEvent:(NSString *)eventName forInstanceId:(NSString *)instanceId withData:(NSString *)data {
     if (!instanceId) return;
     @try {
-        NSString *dataFormatted = (!data) ? @"null" : ([data hasPrefix:@"{"] ? data : [NSString stringWithFormat:@"'%@'", [data stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"]]);
+        NSString *dataFormatted = @"null";
+        if (data) {
+            if ([data hasPrefix:@"{"] || [data hasPrefix:@"["] || [data isEqualToString:@"true"] || [data isEqualToString:@"false"]) {
+                dataFormatted = data; // Already JSON or boolean
+            } else {
+                // String: need safe quoting
+                 dataFormatted = [NSString stringWithFormat:@"\"%@\"", [data stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""]];
+            }
+        }
+        
         NSString *js = [NSString stringWithFormat:@"cordova.fireDocumentEvent('embeddedwebview.%@.%@', {detail: %@});", instanceId, eventName, dataFormatted];
         dispatch_async(dispatch_get_main_queue(), ^{ [self.commandDelegate evalJs:js]; });
     } @catch (NSException *exception) {
         NSLog(@"[EmbeddedWebView] Error firing event: %@", exception.reason);
     }
 }
+
 - (UIColor *)colorFromHexString:(NSString *)hexString {
     if (!hexString || hexString.length == 0) return [UIColor blueColor];
     unsigned rgbValue = 0;

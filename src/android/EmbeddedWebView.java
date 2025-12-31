@@ -15,7 +15,7 @@ import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest; 
 import android.webkit.CookieManager;
-import android.webkit.ConsoleMessage; // <--- ADDED IMPORT
+import android.webkit.ConsoleMessage; 
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
@@ -309,13 +309,9 @@ public class EmbeddedWebView extends CordovaPlugin {
                         progressBar.setVisibility(View.VISIBLE);
                         progressBar.setProgress(0);
                         
-                        // -------------------------------------------------------------
-                        // FIX: ResizeObserver loop completed with undelivered notifications
-                        // Inject JS immediately when page starts
-                        // -------------------------------------------------------------
+                        // FIX: ResizeObserver loop
                         String resizeObserverFix = "window.addEventListener('error', function(event) { if (event.message === 'ResizeObserver loop completed with undelivered notifications.') { event.stopImmediatePropagation(); } });";
                         view.evaluateJavascript(resizeObserverFix, null);
-                        // -------------------------------------------------------------
 
                         injectCookies(view, options, cookieDomain);
                         fireEvent(id, "loadStart", url);
@@ -338,8 +334,14 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
                     @Override
                     public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
-                        String errorJson = "{\"url\":\"" + failingUrl + "\",\"code\":" + errorCode + ",\"message\":\"" + description + "\"}";
-                        fireEvent(id, "loadError", errorJson);
+                        // FIX: JSON Construction using JSONObject
+                        try {
+                            JSONObject err = new JSONObject();
+                            err.put("url", failingUrl);
+                            err.put("code", errorCode);
+                            err.put("message", description);
+                            fireEvent(id, "loadError", err.toString());
+                        } catch (JSONException ignored) {}
                     }
                 });
 
@@ -350,17 +352,14 @@ public class EmbeddedWebView extends CordovaPlugin {
                         progressBar.setProgress(newProgress);
                     }
 
-                    // -------------------------------------------------------------
-                    // FIX: Filter console logs on Android to prevent spam
-                    // -------------------------------------------------------------
+                    // FIX: Filter console logs on Android
                     @Override
                     public boolean onConsoleMessage(ConsoleMessage cm) {
                         if (cm.message() != null && cm.message().contains("ResizeObserver loop")) {
-                            return true; // Return true to say "we handled it", suppressing the log
+                            return true; 
                         }
                         return super.onConsoleMessage(cm);
                     }
-                    // -------------------------------------------------------------
                 });
 
                 container.addView(webView, new FrameLayout.LayoutParams(
@@ -470,7 +469,21 @@ public class EmbeddedWebView extends CordovaPlugin {
         cordova.getActivity().runOnUiThread(() -> {
             WebViewInstance instance = getInstance(id, callbackContext);
             if (instance == null) return;
-            if (instance.container != null) instance.container.setVisibility(visible ? View.VISIBLE : View.GONE);
+            
+            if (instance.container != null) {
+                instance.container.setVisibility(visible ? View.VISIBLE : View.GONE);
+                
+                // --- FIX: Stop video playback when hidden ---
+                if (!visible) {
+                    instance.webView.onPause(); // Native method to stop media & timers
+                    // Double safety: inject JS to pause
+                    String pauseScript = "(function(){ var v=document.querySelectorAll('video, audio'); for(var i=0;i<v.length;i++){ v[i].pause(); } })();";
+                    instance.webView.evaluateJavascript(pauseScript, null);
+                } else {
+                    instance.webView.onResume(); // Resume timers/media when visible
+                }
+                // ---------------------------------------------
+            }
             if (callbackContext != null) callbackContext.success("Visibility: " + visible);
         });
     }
@@ -528,16 +541,28 @@ public class EmbeddedWebView extends CordovaPlugin {
             boolean newCanGoForward = instance.webView.canGoForward();
             if (newCanGoBack != instance.canGoBack) { instance.canGoBack = newCanGoBack; fireEvent(id, "canGoBackChanged", String.valueOf(instance.canGoBack)); }
             if (newCanGoForward != instance.canGoForward) { instance.canGoForward = newCanGoForward; fireEvent(id, "canGoForwardChanged", String.valueOf(instance.canGoForward)); }
-            String navigationState = "{\"canGoBack\":" + instance.canGoBack + ",\"canGoForward\":" + instance.canGoForward + "}";
-            fireEvent(id, "navigationStateChanged", navigationState);
+            
+            // FIX: Use JSONObject for safe JSON construction
+            try {
+                JSONObject nav = new JSONObject();
+                nav.put("canGoBack", instance.canGoBack);
+                nav.put("canGoForward", instance.canGoForward);
+                fireEvent(id, "navigationStateChanged", nav.toString());
+            } catch (JSONException ignored) {}
         });
     }
+    
     private void fireEvent(String id, String eventName, String data) {
         try {
             String payload;
-            if (data != null && data.trim().startsWith("{")) payload = data;
-            else if (data == null) payload = "null";
-            else payload = "'" + data.replace("'", "\\'") + "'";
+            if (data != null && data.trim().startsWith("{")) {
+                payload = data; // Assumes valid JSON if it starts with {
+            } else if (data == null) {
+                payload = "null";
+            } else {
+                 // Simple string safety: Quote it and escape existing quotes
+                payload = "\"" + data.replace("\"", "\\\"") + "\"";
+            }
             String fullEventName = "embeddedwebview." + id + "." + eventName;
             String js = "javascript:cordova.fireDocumentEvent('" + fullEventName + "', {detail: " + payload + "});";
             cordova.getActivity().runOnUiThread(() -> { cordovaWebView.getView().post(() -> { try { cordovaWebView.loadUrl(js); } catch (Exception e) {} }); });
