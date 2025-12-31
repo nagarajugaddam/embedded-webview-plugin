@@ -309,8 +309,8 @@ public class EmbeddedWebView extends CordovaPlugin {
                         progressBar.setVisibility(View.VISIBLE);
                         progressBar.setProgress(0);
                         
-                        // FIX: ResizeObserver loop - Robust Swallow Script
-                        String resizeObserverFix = "window.addEventListener('error', function(event) { if (event.message && event.message.indexOf('ResizeObserver loop') !== -1) { event.stopImmediatePropagation(); event.preventDefault(); return false; } });";
+                        // FIX: Aggressive ResizeObserver Swallow Script
+                        String resizeObserverFix = "window.addEventListener('error', function(event) { if (event.message && event.message.includes('ResizeObserver loop')) { event.stopImmediatePropagation(); event.preventDefault(); return false; } });";
                         view.evaluateJavascript(resizeObserverFix, null);
 
                         injectCookies(view, options, cookieDomain);
@@ -334,7 +334,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
                     @Override
                     public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
-                        // FIX: JSON Construction using JSONObject
                         try {
                             JSONObject err = new JSONObject();
                             err.put("url", failingUrl);
@@ -431,6 +430,9 @@ public class EmbeddedWebView extends CordovaPlugin {
             WebViewInstance instance = instances.remove(id);
             if (instance != null && instance.webView != null) {
                 try {
+                    // FIX: Immediately stop loading and detach from view
+                    instance.webView.stopLoading();
+                    
                     if (instance.container != null) {
                         ViewGroup parent = (ViewGroup) instance.container.getParent();
                         if (parent != null) parent.removeView(instance.container);
@@ -473,18 +475,14 @@ public class EmbeddedWebView extends CordovaPlugin {
             if (instance.container != null) {
                 instance.container.setVisibility(visible ? View.VISIBLE : View.GONE);
                 
-                // --- FIX: Stop YOUTUBE & VIMEO playback when hidden ---
+                // --- FIX: UPDATED Video Stop Script (Using reload for YouTube as requested) ---
                 if (!visible) {
                     instance.webView.onPause(); 
                     String pauseScript = "javascript:(function(){"
-                            + "var v=document.querySelectorAll('video, audio'); for(var i=0;i<v.length;i++){ v[i].pause(); }"
-                            + "var f=document.querySelectorAll('iframe');"
-                            + "for(var i=0;i<f.length;i++){"
-                            + "try{"
-                            + "f[i].contentWindow.postMessage(JSON.stringify({event:'command',func:'pauseVideo'}), '*');"
-                            + "f[i].contentWindow.postMessage(JSON.stringify({method:'pause'}), '*');"
-                            + "}catch(e){}"
-                            + "}"
+                            + "try {"
+                            + "  document.querySelectorAll('iframe[src*=\"youtube.com\"]').forEach(function(f){ f.src = f.src; });"
+                            + "  var v=document.querySelectorAll('video, audio'); for(var i=0;i<v.length;i++){ v[i].pause(); }"
+                            + "} catch(e) {}"
                             + "})();";
                     instance.webView.evaluateJavascript(pauseScript, null);
                 } else {
@@ -550,7 +548,6 @@ public class EmbeddedWebView extends CordovaPlugin {
             if (newCanGoBack != instance.canGoBack) { instance.canGoBack = newCanGoBack; fireEvent(id, "canGoBackChanged", String.valueOf(instance.canGoBack)); }
             if (newCanGoForward != instance.canGoForward) { instance.canGoForward = newCanGoForward; fireEvent(id, "canGoForwardChanged", String.valueOf(instance.canGoForward)); }
             
-            // FIX: Use JSONObject for safe JSON construction
             try {
                 JSONObject nav = new JSONObject();
                 nav.put("canGoBack", instance.canGoBack);
@@ -564,11 +561,10 @@ public class EmbeddedWebView extends CordovaPlugin {
         try {
             String payload;
             if (data != null && data.trim().startsWith("{")) {
-                payload = data; // Assumes valid JSON if it starts with {
+                payload = data; 
             } else if (data == null) {
                 payload = "null";
             } else {
-                 // Simple string safety: Quote it and escape existing quotes
                 payload = "\"" + data.replace("\"", "\\\"") + "\"";
             }
             String fullEventName = "embeddedwebview." + id + "." + eventName;

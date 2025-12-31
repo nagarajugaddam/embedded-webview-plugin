@@ -155,22 +155,22 @@
                 config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
                 config.allowsInlineMediaPlayback = YES;
 
-                // FIX 1: Add Event Listener to swallow the error (Standard Browser behavior)
-                NSString *resizeObserverFix = @"window.addEventListener('error', function(event) { if (event.message && event.message.indexOf('ResizeObserver loop') !== -1) { event.stopImmediatePropagation(); event.preventDefault(); return false; } });";
+                // FIX: Aggressive ResizeObserver Swallow Script
+                NSString *resizeObserverFix = @"window.addEventListener('error', function(event) { if (event.message && event.message.includes('ResizeObserver loop')) { event.stopImmediatePropagation(); event.preventDefault(); return false; } });";
                 WKUserScript *resizeFixScript = [[WKUserScript alloc] initWithSource:resizeObserverFix injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
                 [config.userContentController addUserScript:resizeFixScript];
                 
-                // FIX 2: Updated Debug Script (Logging) to IGNORE ResizeObserver errors
+                // Logging Interceptor (Filters ResizeObserver before sending to Native)
                 NSString *debugScript =
                     @"window.onerror = function(msg, url, line) {"
-                    @"  if (msg && msg.indexOf('ResizeObserver loop') !== -1) return true;" // <-- IGNORE HERE
+                    @"  if (msg && msg.toString().includes('ResizeObserver loop')) return true;"
                     @"  window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-fatal', msg: msg, line: line, url: url});"
                     @"};"
                     @"var origLog = console.log; console.log = function() { origLog.apply(console, arguments); var msg = Array.from(arguments).join(' '); window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-log', msg: msg}); };"
                     @"var origWarn = console.warn; console.warn = function() { origWarn.apply(console, arguments); var msg = Array.from(arguments).join(' '); window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-warn', msg: msg}); };"
                     @"var origErr = console.error; console.error = function() {"
                     @"  var msg = Array.from(arguments).join(' ');"
-                    @"  if (msg && msg.indexOf('ResizeObserver loop') !== -1) return;" // <-- IGNORE HERE
+                    @"  if (msg && msg.toString().includes('ResizeObserver loop')) return;"
                     @"  origErr.apply(console, arguments);"
                     @"  window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-error', msg: msg});"
                     @"};";
@@ -363,16 +363,19 @@
         }
         
         if (instance.webView) {
+            // FIX: IMMEDIATELY detach delegates to prevent race conditions/ResizeObserver logs during dealloc
+            instance.webView.navigationDelegate = nil;
+            instance.webView.UIDelegate = nil;
+
             @try { [instance.webView removeObserver:self forKeyPath:@"estimatedProgress"]; } @catch(NSException *e){}
             @try { [instance.webView removeObserver:self forKeyPath:@"canGoBack"]; } @catch(NSException *e){}
             @try { [instance.webView removeObserver:self forKeyPath:@"canGoForward"]; } @catch(NSException *e){}
-
+            
+            // Clean up message handler
             @try { [instance.webView.configuration.userContentController removeScriptMessageHandlerForName:@"consoleHandler"]; } @catch(NSException *e){}
             
             [instance.webView stopLoading];
             [instance.webView removeFromSuperview];
-            instance.webView.navigationDelegate = nil;
-            instance.webView.UIDelegate = nil;
             instance.webView = nil;
         }
         
@@ -385,6 +388,8 @@
         }
     });
 }
+
+// ... [destroyAllInstances, loadUrl, executeScript remain same] ...
 
 - (void)destroyAllInstances {
     NSArray<NSString *> *keys = [self.instances.allKeys copy];
@@ -428,6 +433,7 @@
         }];
     });
 }
+
 - (void)setVisible:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     BOOL visible = [[command argumentAtIndex:1] boolValue];
@@ -436,27 +442,25 @@
         if (instance && instance.container) {
             instance.container.hidden = !visible;
             
-            // --- FIX: Stop YOUTUBE & VIMEO playback when hidden ---
+            // --- FIX: UPDATED Video Stop Script (Using reload for YouTube as requested) ---
             if (!visible) {
                 NSString *pauseScript =
                     @"(function(){"
-                    @"  var v=document.querySelectorAll('video, audio'); for(var i=0;i<v.length;i++){ v[i].pause(); }"
-                    @"  var f=document.querySelectorAll('iframe');"
-                    @"  for(var i=0;i<f.length;i++){"
-                    @"    try{"
-                    @"      f[i].contentWindow.postMessage(JSON.stringify({event:'command',func:'pauseVideo'}), '*');"
-                    @"      f[i].contentWindow.postMessage(JSON.stringify({method:'pause'}), '*');"
-                    @"    }catch(e){}"
-                    @"  }"
+                    @"  try {"
+                    @"    document.querySelectorAll('iframe[src*=\"youtube.com\"]').forEach(f => { f.src = f.src; });"
+                    @"    var v=document.querySelectorAll('video, audio'); for(var i=0;i<v.length;i++){ v[i].pause(); }"
+                    @"  } catch(e) {}"
                     @"})();";
                 [instance.webView evaluateJavaScript:pauseScript completionHandler:nil];
             }
-            // --------------------------------------------------------
+            // -----------------------------------------------------------------------------
             
             [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
         }
     });
 }
+
+// ... [reload, goBack, goForward, canGoBack remain same] ...
 - (void)reload:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -502,17 +506,27 @@
         }
     });
 }
+
 - (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
     if ([message.name isEqualToString:@"consoleHandler"]) {
         NSDictionary *body = message.body;
+        
+        // FIX: Native side filter for ResizeObserver Loop
+        // Even if JS catches it, this ensures it never bubbles up to the Cordova Event
+        NSString *msg = body[@"msg"] ?: @"";
+        if ([msg rangeOfString:@"ResizeObserver loop"].location != NSNotFound) {
+            return;
+        }
+
         NSString *instanceId = [self instanceIdForWebView:message.webView];
         if (instanceId) {
-            // SAFE JSON SERIALIZATION
             NSString *json = [self jsonStringFromDictionary:body];
             [self fireEvent:@"consoleLog" forInstanceId:instanceId withData:json];
         }
     }
 }
+
+// ... [rest of the file remains the same: delegates, json helper, etc] ...
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     
@@ -565,7 +579,6 @@
             NSString *instanceId = [self instanceIdForWebView:webView];
             NSString *url = httpResponse.URL.absoluteString;
             
-            // SAFE JSON SERIALIZATION
             NSDictionary *errDict = @{
                 @"url": url ?: [NSNull null],
                 @"code": @(statusCode),
@@ -612,7 +625,6 @@
         NSString *instanceId = [self instanceIdForWebView:webView];
         NSString *url = webView.URL.absoluteString ?: @"";
         
-        // SAFE JSON SERIALIZATION
         NSDictionary *errDict = @{
             @"url": url,
             @"code": @(error.code),
@@ -668,7 +680,6 @@
         [self fireEvent:@"canGoForwardChanged" forInstanceId:instanceId withData:instance.canGoForward ? @"true" : @"false"];
     }
     
-    // SAFE JSON SERIALIZATION
     NSDictionary *navDict = @{
         @"canGoBack": @(instance.canGoBack),
         @"canGoForward": @(instance.canGoForward)
@@ -677,7 +688,6 @@
     [self fireEvent:@"navigationStateChanged" forInstanceId:instanceId withData:navState];
 }
 
-// HELPER: Convert Dict to JSON String (Resolves Parse Errors)
 - (NSString *)jsonStringFromDictionary:(NSDictionary *)dict {
     NSError *error;
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:dict options:0 error:&error];
@@ -691,9 +701,8 @@
         NSString *dataFormatted = @"null";
         if (data) {
             if ([data hasPrefix:@"{"] || [data hasPrefix:@"["] || [data isEqualToString:@"true"] || [data isEqualToString:@"false"]) {
-                dataFormatted = data; // Already JSON or boolean
+                dataFormatted = data;
             } else {
-                // String: need safe quoting
                  dataFormatted = [NSString stringWithFormat:@"\"%@\"", [data stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""]];
             }
         }
