@@ -428,12 +428,22 @@
         if (instance && instance.container) {
             instance.container.hidden = !visible;
             
-            // --- FIX: Stop video playback when hidden ---
+            // --- FIX: Stop YOUTUBE & VIMEO playback when hidden ---
             if (!visible) {
-                NSString *pauseScript = @"(function(){ var v=document.querySelectorAll('video, audio'); for(var i=0;i<v.length;i++){ v[i].pause(); } })();";
+                NSString *pauseScript =
+                    @"(function(){"
+                    @"  var v=document.querySelectorAll('video, audio'); for(var i=0;i<v.length;i++){ v[i].pause(); }"
+                    @"  var f=document.querySelectorAll('iframe');"
+                    @"  for(var i=0;i<f.length;i++){"
+                    @"    try{"
+                    @"      f[i].contentWindow.postMessage(JSON.stringify({event:'command',func:'pauseVideo'}), '*');"
+                    @"      f[i].contentWindow.postMessage(JSON.stringify({method:'pause'}), '*');"
+                    @"    }catch(e){}"
+                    @"  }"
+                    @"})();";
                 [instance.webView evaluateJavaScript:pauseScript completionHandler:nil];
             }
-            // ---------------------------------------------
+            // --------------------------------------------------------
             
             [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
         }

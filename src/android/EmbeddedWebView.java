@@ -473,16 +473,24 @@ public class EmbeddedWebView extends CordovaPlugin {
             if (instance.container != null) {
                 instance.container.setVisibility(visible ? View.VISIBLE : View.GONE);
                 
-                // --- FIX: Stop video playback when hidden ---
+                // --- FIX: Stop YOUTUBE & VIMEO playback when hidden ---
                 if (!visible) {
-                    instance.webView.onPause(); // Native method to stop media & timers
-                    // Double safety: inject JS to pause
-                    String pauseScript = "(function(){ var v=document.querySelectorAll('video, audio'); for(var i=0;i<v.length;i++){ v[i].pause(); } })();";
+                    instance.webView.onPause(); 
+                    String pauseScript = "javascript:(function(){"
+                            + "var v=document.querySelectorAll('video, audio'); for(var i=0;i<v.length;i++){ v[i].pause(); }"
+                            + "var f=document.querySelectorAll('iframe');"
+                            + "for(var i=0;i<f.length;i++){"
+                            + "try{"
+                            + "f[i].contentWindow.postMessage(JSON.stringify({event:'command',func:'pauseVideo'}), '*');"
+                            + "f[i].contentWindow.postMessage(JSON.stringify({method:'pause'}), '*');"
+                            + "}catch(e){}"
+                            + "}"
+                            + "})();";
                     instance.webView.evaluateJavascript(pauseScript, null);
                 } else {
-                    instance.webView.onResume(); // Resume timers/media when visible
+                    instance.webView.onResume(); 
                 }
-                // ---------------------------------------------
+                // --------------------------------------------------------
             }
             if (callbackContext != null) callbackContext.success("Visibility: " + visible);
         });
