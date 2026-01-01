@@ -472,16 +472,18 @@ public class EmbeddedWebView extends CordovaPlugin {
             if (instance == null) return;
             
             if (instance.container != null) {
-                // --- FIX: LAYOUT PRESERVATION ---
-                // Use INVISIBLE instead of GONE to prevent layout collapse/resize loop
+                // Layout Preservation
                 instance.container.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
                 
                 if (!visible) {
                     instance.webView.onPause(); 
-                    // VIDEO STOP SCRIPT (Youtube reload fix)
+                    // FIX: Use cloneNode+replaceChild to reset Youtube without affecting History
                     String pauseScript = "javascript:(function(){"
                             + "try {"
-                            + "  document.querySelectorAll('iframe[src*=\"youtube.com\"]').forEach(function(f){ f.src = f.src; });"
+                            + "  document.querySelectorAll('iframe[src*=\"youtube.com\"]').forEach(function(f){"
+                            + "    var clone = f.cloneNode(true);"
+                            + "    f.parentNode.replaceChild(clone, f);"
+                            + "  });"
                             + "  var v=document.querySelectorAll('video, audio'); for(var i=0;i<v.length;i++){ v[i].pause(); }"
                             + "} catch(e) {}"
                             + "})();";

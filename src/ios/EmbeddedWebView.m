@@ -155,7 +155,12 @@
                 config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
                 config.allowsInlineMediaPlayback = YES;
 
-                // Logging & Suppression
+                // FIX: Aggressive ResizeObserver Swallow Script
+                NSString *resizeObserverFix = @"window.addEventListener('error', function(event) { if (event.message && event.message.includes('ResizeObserver loop')) { event.stopImmediatePropagation(); event.preventDefault(); return false; } });";
+                WKUserScript *resizeFixScript = [[WKUserScript alloc] initWithSource:resizeObserverFix injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
+                [config.userContentController addUserScript:resizeFixScript];
+                
+                // Logging Interceptor
                 NSString *debugScript =
                     @"window.onerror = function(msg, url, line) {"
                     @"  if (msg && msg.toString().includes('ResizeObserver loop')) return true;"
@@ -363,8 +368,6 @@
             @try { [instance.webView removeObserver:self forKeyPath:@"estimatedProgress"]; } @catch(NSException *e){}
             @try { [instance.webView removeObserver:self forKeyPath:@"canGoBack"]; } @catch(NSException *e){}
             @try { [instance.webView removeObserver:self forKeyPath:@"canGoForward"]; } @catch(NSException *e){}
-            
-            // REMOVE MESSAGE HANDLER to stop logs
             @try { [instance.webView.configuration.userContentController removeScriptMessageHandlerForName:@"consoleHandler"]; } @catch(NSException *e){}
             
             [instance.webView stopLoading];
@@ -434,35 +437,35 @@
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
         if (instance && instance.container) {
             
-            // --- FIX: LAYOUT PRESERVATION ---
-            // Instead of hidden = YES, we use alpha = 0 to keep dimensions
+            // Layout Preservation (prevents ResizeObserver error)
             if (visible) {
                 instance.container.hidden = NO;
                 instance.container.alpha = 1.0;
                 instance.container.userInteractionEnabled = YES;
             } else {
-                instance.container.alpha = 0.0; // Make transparent
-                instance.container.userInteractionEnabled = NO; // Disable touches
-                // Do NOT set hidden=YES, or the ResizeObserver loop will trigger!
+                instance.container.alpha = 0.0;
+                instance.container.userInteractionEnabled = NO;
                 
-                // VIDEO STOP SCRIPT
+                // FIX: Use cloneNode+replaceChild to reset Youtube without affecting History
                 NSString *pauseScript =
                     @"(function(){"
                     @"  try {"
-                    @"    document.querySelectorAll('iframe[src*=\"youtube.com\"]').forEach(f => { f.src = f.src; });"
+                    @"    document.querySelectorAll('iframe[src*=\"youtube.com\"]').forEach(f => { "
+                    @"      var clone = f.cloneNode(true);"
+                    @"      f.parentNode.replaceChild(clone, f);"
+                    @"    });"
                     @"    var v=document.querySelectorAll('video, audio'); for(var i=0;i<v.length;i++){ v[i].pause(); }"
                     @"  } catch(e) {}"
                     @"})();";
                 [instance.webView evaluateJavaScript:pauseScript completionHandler:nil];
             }
-            // --------------------------------
             
             [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
         }
     });
 }
 
-// ... [reload, goBack, etc. - UNCHANGED] ...
+// ... [reload, goBack, goForward, etc - UNCHANGED] ...
 
 - (void)reload:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
@@ -514,7 +517,6 @@
     if ([message.name isEqualToString:@"consoleHandler"]) {
         NSDictionary *body = message.body;
         
-        // FIX: Native side filter
         NSString *msg = body[@"msg"] ?: @"";
         if ([msg rangeOfString:@"ResizeObserver loop"].location != NSNotFound) {
             return;
@@ -528,7 +530,7 @@
     }
 }
 
-// ... [rest of file: delegates, helpers - UNCHANGED] ...
+// ... [delegates and helpers] ...
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     
