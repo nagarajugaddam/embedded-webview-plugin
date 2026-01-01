@@ -309,7 +309,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                         progressBar.setVisibility(View.VISIBLE);
                         progressBar.setProgress(0);
                         
-                        // FIX: Aggressive ResizeObserver Swallow Script
+                        // FIX: ResizeObserver loop - Robust Swallow Script
                         String resizeObserverFix = "window.addEventListener('error', function(event) { if (event.message && event.message.includes('ResizeObserver loop')) { event.stopImmediatePropagation(); event.preventDefault(); return false; } });";
                         view.evaluateJavascript(resizeObserverFix, null);
 
@@ -351,7 +351,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                         progressBar.setProgress(newProgress);
                     }
 
-                    // FIX: Filter console logs on Android
                     @Override
                     public boolean onConsoleMessage(ConsoleMessage cm) {
                         if (cm.message() != null && cm.message().contains("ResizeObserver loop")) {
@@ -430,7 +429,7 @@ public class EmbeddedWebView extends CordovaPlugin {
             WebViewInstance instance = instances.remove(id);
             if (instance != null && instance.webView != null) {
                 try {
-                    // FIX: Immediately stop loading and detach from view
+                    // FIX: Immediately stop loading
                     instance.webView.stopLoading();
                     
                     if (instance.container != null) {
@@ -473,11 +472,13 @@ public class EmbeddedWebView extends CordovaPlugin {
             if (instance == null) return;
             
             if (instance.container != null) {
-                instance.container.setVisibility(visible ? View.VISIBLE : View.GONE);
+                // --- FIX: LAYOUT PRESERVATION ---
+                // Use INVISIBLE instead of GONE to prevent layout collapse/resize loop
+                instance.container.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
                 
-                // --- FIX: UPDATED Video Stop Script (Using reload for YouTube as requested) ---
                 if (!visible) {
                     instance.webView.onPause(); 
+                    // VIDEO STOP SCRIPT (Youtube reload fix)
                     String pauseScript = "javascript:(function(){"
                             + "try {"
                             + "  document.querySelectorAll('iframe[src*=\"youtube.com\"]').forEach(function(f){ f.src = f.src; });"
@@ -488,7 +489,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                 } else {
                     instance.webView.onResume(); 
                 }
-                // --------------------------------------------------------
             }
             if (callbackContext != null) callbackContext.success("Visibility: " + visible);
         });

@@ -155,12 +155,7 @@
                 config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
                 config.allowsInlineMediaPlayback = YES;
 
-                // FIX: Aggressive ResizeObserver Swallow Script
-                NSString *resizeObserverFix = @"window.addEventListener('error', function(event) { if (event.message && event.message.includes('ResizeObserver loop')) { event.stopImmediatePropagation(); event.preventDefault(); return false; } });";
-                WKUserScript *resizeFixScript = [[WKUserScript alloc] initWithSource:resizeObserverFix injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
-                [config.userContentController addUserScript:resizeFixScript];
-                
-                // Logging Interceptor (Filters ResizeObserver before sending to Native)
+                // Logging & Suppression
                 NSString *debugScript =
                     @"window.onerror = function(msg, url, line) {"
                     @"  if (msg && msg.toString().includes('ResizeObserver loop')) return true;"
@@ -302,7 +297,6 @@
                     [request setValue:cookieHeader forHTTPHeaderField:@"Cookie"];
                 }
 
-                // Native Cookie Store
                 WKHTTPCookieStore *cookieStore = config.websiteDataStore.httpCookieStore;
                 BOOL isSecure = [url.lowercaseString hasPrefix:@"https"];
                 NSArray *cookieKeys = instance.cookies ? instance.cookies.allKeys : @[];
@@ -363,7 +357,6 @@
         }
         
         if (instance.webView) {
-            // FIX: IMMEDIATELY detach delegates to prevent race conditions/ResizeObserver logs during dealloc
             instance.webView.navigationDelegate = nil;
             instance.webView.UIDelegate = nil;
 
@@ -371,7 +364,7 @@
             @try { [instance.webView removeObserver:self forKeyPath:@"canGoBack"]; } @catch(NSException *e){}
             @try { [instance.webView removeObserver:self forKeyPath:@"canGoForward"]; } @catch(NSException *e){}
             
-            // Clean up message handler
+            // REMOVE MESSAGE HANDLER to stop logs
             @try { [instance.webView.configuration.userContentController removeScriptMessageHandlerForName:@"consoleHandler"]; } @catch(NSException *e){}
             
             [instance.webView stopLoading];
@@ -389,7 +382,7 @@
     });
 }
 
-// ... [destroyAllInstances, loadUrl, executeScript remain same] ...
+// ... [destroyAllInstances, loadUrl, executeScript - UNCHANGED] ...
 
 - (void)destroyAllInstances {
     NSArray<NSString *> *keys = [self.instances.allKeys copy];
@@ -440,10 +433,19 @@
     dispatch_async(dispatch_get_main_queue(), ^{
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
         if (instance && instance.container) {
-            instance.container.hidden = !visible;
             
-            // --- FIX: UPDATED Video Stop Script (Using reload for YouTube as requested) ---
-            if (!visible) {
+            // --- FIX: LAYOUT PRESERVATION ---
+            // Instead of hidden = YES, we use alpha = 0 to keep dimensions
+            if (visible) {
+                instance.container.hidden = NO;
+                instance.container.alpha = 1.0;
+                instance.container.userInteractionEnabled = YES;
+            } else {
+                instance.container.alpha = 0.0; // Make transparent
+                instance.container.userInteractionEnabled = NO; // Disable touches
+                // Do NOT set hidden=YES, or the ResizeObserver loop will trigger!
+                
+                // VIDEO STOP SCRIPT
                 NSString *pauseScript =
                     @"(function(){"
                     @"  try {"
@@ -453,14 +455,15 @@
                     @"})();";
                 [instance.webView evaluateJavaScript:pauseScript completionHandler:nil];
             }
-            // -----------------------------------------------------------------------------
+            // --------------------------------
             
             [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
         }
     });
 }
 
-// ... [reload, goBack, goForward, canGoBack remain same] ...
+// ... [reload, goBack, etc. - UNCHANGED] ...
+
 - (void)reload:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -511,8 +514,7 @@
     if ([message.name isEqualToString:@"consoleHandler"]) {
         NSDictionary *body = message.body;
         
-        // FIX: Native side filter for ResizeObserver Loop
-        // Even if JS catches it, this ensures it never bubbles up to the Cordova Event
+        // FIX: Native side filter
         NSString *msg = body[@"msg"] ?: @"";
         if ([msg rangeOfString:@"ResizeObserver loop"].location != NSNotFound) {
             return;
@@ -526,7 +528,7 @@
     }
 }
 
-// ... [rest of the file remains the same: delegates, json helper, etc] ...
+// ... [rest of file: delegates, helpers - UNCHANGED] ...
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     
