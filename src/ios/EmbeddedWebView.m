@@ -156,7 +156,23 @@
                 config.allowsInlineMediaPlayback = YES;
 
                 // FIX: Aggressive ResizeObserver Swallow Script
-                NSString *resizeObserverFix = @"window.addEventListener('error', function(event) { if (event.message && event.message.includes('ResizeObserver loop')) { event.stopImmediatePropagation(); event.preventDefault(); return false; } });";
+                // ----------------------------------------------------------------------------------
+                // CRITICAL FIX FOR 120Hz iPHONES
+                // This forces ResizeObserver to wait for the next frame, effectively breaking the infinite loop.
+                // ----------------------------------------------------------------------------------
+                NSString *resizeObserverFix = 
+                    @"var _RO = window.ResizeObserver;"
+                    @"if(_RO) {"
+                    @"  window.ResizeObserver = class extends _RO {"
+                    @"    constructor(callback) {"
+                    @"      super((entries, observer) => {"
+                    @"        window.requestAnimationFrame(() => {"
+                    @"          callback(entries, observer);"
+                    @"        });"
+                    @"      });"
+                    @"    }"
+                    @"  };"
+                    @"}";
                 WKUserScript *resizeFixScript = [[WKUserScript alloc] initWithSource:resizeObserverFix injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
                 [config.userContentController addUserScript:resizeFixScript];
                 
@@ -176,9 +192,9 @@
                     @"};";
 
                 WKUserScript *debugUserScript = [[WKUserScript alloc] initWithSource:debugScript injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
-                [config.userContentController addUserScript:debugUserScript];
+                // [config.userContentController addUserScript:debugUserScript];
                 
-                [config.userContentController addScriptMessageHandler:self name:@"consoleHandler"];
+                // [config.userContentController addScriptMessageHandler:self name:@"consoleHandler"];
                 
                 // Cookie Logic
                 NSURL *pageURL = [NSURL URLWithString:url];
