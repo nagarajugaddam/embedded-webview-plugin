@@ -309,8 +309,20 @@ public class EmbeddedWebView extends CordovaPlugin {
                         progressBar.setVisibility(View.VISIBLE);
                         progressBar.setProgress(0);
                         
-                        // FIX: ResizeObserver loop - Robust Swallow Script
-                        String resizeObserverFix = "window.addEventListener('error', function(event) { if (event.message && event.message.includes('ResizeObserver loop')) { event.stopImmediatePropagation(); event.preventDefault(); return false; } });";
+                        // FIX: ResizeObserver loop
+                        String resizeObserverFix = 
+                            "var _RO = window.ResizeObserver;" +
+                            "if(_RO) {" +
+                            "  window.ResizeObserver = class extends _RO {" +
+                            "    constructor(callback) {" +
+                            "      super((entries, observer) => {" +
+                            "        window.requestAnimationFrame(() => {" +
+                            "          callback(entries, observer);" +
+                            "        });" +
+                            "      });" +
+                            "    }" +
+                            "  };" +
+                            "}";
                         view.evaluateJavascript(resizeObserverFix, null);
 
                         injectCookies(view, options, cookieDomain);
@@ -351,9 +363,10 @@ public class EmbeddedWebView extends CordovaPlugin {
                         progressBar.setProgress(newProgress);
                     }
 
+                    // FIX: Filter console logs on Android
                     @Override
                     public boolean onConsoleMessage(ConsoleMessage cm) {
-                        if (cm.message() != null && cm.message().contains("ResizeObserver loop")) {
+                        if (cm.message() != null && cm.message().toLowerCase().contains("resizeobserver")) {
                             return true; 
                         }
                         return super.onConsoleMessage(cm);

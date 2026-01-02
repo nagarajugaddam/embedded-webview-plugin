@@ -155,10 +155,8 @@
                 config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
                 config.allowsInlineMediaPlayback = YES;
 
-                // FIX: Aggressive ResizeObserver Swallow Script
                 // ----------------------------------------------------------------------------------
-                // CRITICAL FIX FOR 120Hz iPHONES
-                // This forces ResizeObserver to wait for the next frame, effectively breaking the infinite loop.
+                // FIX 1: ResizeObserver Throttle (Fixes 120Hz CPU Freeze)
                 // ----------------------------------------------------------------------------------
                 NSString *resizeObserverFix = 
                     @"var _RO = window.ResizeObserver;"
@@ -176,25 +174,33 @@
                 WKUserScript *resizeFixScript = [[WKUserScript alloc] initWithSource:resizeObserverFix injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
                 [config.userContentController addUserScript:resizeFixScript];
                 
-                // Logging Interceptor
+                // ----------------------------------------------------------------------------------
+                // FIX 2: Aggressive Logging Interceptor (Prevents Bridge Flood)
+                // Filters ResizeObserver errors from console.log/warn/error BEFORE they leave JS
+                // ----------------------------------------------------------------------------------
                 NSString *debugScript =
+                    @"function shouldIgnore(msg) { return msg && msg.toString().toLowerCase().indexOf('resizeobserver') !== -1; }"
                     @"window.onerror = function(msg, url, line) {"
-                    @"  if (msg && msg.toString().includes('ResizeObserver loop')) return true;"
+                    @"  if (shouldIgnore(msg)) return true;"
                     @"  window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-fatal', msg: msg, line: line, url: url});"
                     @"};"
-                    @"var origLog = console.log; console.log = function() { origLog.apply(console, arguments); var msg = Array.from(arguments).join(' '); window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-log', msg: msg}); };"
-                    @"var origWarn = console.warn; console.warn = function() { origWarn.apply(console, arguments); var msg = Array.from(arguments).join(' '); window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-warn', msg: msg}); };"
+                    @"var origLog = console.log; console.log = function() { "
+                    @"  var msg = Array.from(arguments).join(' '); if(shouldIgnore(msg)) return;"
+                    @"  origLog.apply(console, arguments); window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-log', msg: msg});"
+                    @"};"
+                    @"var origWarn = console.warn; console.warn = function() { "
+                    @"  var msg = Array.from(arguments).join(' '); if(shouldIgnore(msg)) return;"
+                    @"  origWarn.apply(console, arguments); window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-warn', msg: msg});"
+                    @"};"
                     @"var origErr = console.error; console.error = function() {"
-                    @"  var msg = Array.from(arguments).join(' ');"
-                    @"  if (msg && msg.toString().includes('ResizeObserver loop')) return;"
-                    @"  origErr.apply(console, arguments);"
-                    @"  window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-error', msg: msg});"
+                    @"  var msg = Array.from(arguments).join(' '); if(shouldIgnore(msg)) return;"
+                    @"  origErr.apply(console, arguments); window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-error', msg: msg});"
                     @"};";
 
                 WKUserScript *debugUserScript = [[WKUserScript alloc] initWithSource:debugScript injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
-                // [config.userContentController addUserScript:debugUserScript];
+                [config.userContentController addUserScript:debugUserScript];
                 
-                // [config.userContentController addScriptMessageHandler:self name:@"consoleHandler"];
+                [config.userContentController addScriptMessageHandler:self name:@"consoleHandler"];
                 
                 // Cookie Logic
                 NSURL *pageURL = [NSURL URLWithString:url];
@@ -384,6 +390,8 @@
             @try { [instance.webView removeObserver:self forKeyPath:@"estimatedProgress"]; } @catch(NSException *e){}
             @try { [instance.webView removeObserver:self forKeyPath:@"canGoBack"]; } @catch(NSException *e){}
             @try { [instance.webView removeObserver:self forKeyPath:@"canGoForward"]; } @catch(NSException *e){}
+            
+            // Clean up message handler immediately
             @try { [instance.webView.configuration.userContentController removeScriptMessageHandlerForName:@"consoleHandler"]; } @catch(NSException *e){}
             
             [instance.webView stopLoading];
@@ -453,20 +461,23 @@
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
         if (instance && instance.container) {
             
-            // Layout Preservation (prevents ResizeObserver error)
+            // --- LAYOUT PRESERVATION (Fixes ResizeObserver Loop) ---
             if (visible) {
                 instance.container.hidden = NO;
                 instance.container.alpha = 1.0;
                 instance.container.userInteractionEnabled = YES;
+                [instance.container.superview bringSubviewToFront:instance.container];
             } else {
                 instance.container.alpha = 0.0;
                 instance.container.userInteractionEnabled = NO;
+                [instance.container.superview sendSubviewToBack:instance.container];
                 
-                // FIX: Use cloneNode+replaceChild to reset Youtube without affecting History
+                // --- HISTORY-SAFE VIDEO STOPPER ---
+                // Replaces the Youtube iframe with a clone. This pauses video without adding to History.
                 NSString *pauseScript =
                     @"(function(){"
                     @"  try {"
-                    @"    document.querySelectorAll('iframe[src*=\"youtube.com\"]').forEach(f => { "
+                    @"    document.querySelectorAll('iframe[src*=\"youtube.com\"]').forEach(function(f){"
                     @"      var clone = f.cloneNode(true);"
                     @"      f.parentNode.replaceChild(clone, f);"
                     @"    });"
@@ -475,13 +486,14 @@
                     @"})();";
                 [instance.webView evaluateJavaScript:pauseScript completionHandler:nil];
             }
+            // -----------------------------------------------------
             
             [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
         }
     });
 }
 
-// ... [reload, goBack, goForward, etc - UNCHANGED] ...
+// ... [reload, goBack, etc - UNCHANGED] ...
 
 - (void)reload:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
@@ -533,8 +545,12 @@
     if ([message.name isEqualToString:@"consoleHandler"]) {
         NSDictionary *body = message.body;
         
+        // -------------------------------------------------------------
+        // FIX: FINAL SAFETY NET - NATIVE LOG FILTER
+        // Absolutely refuses to send any ResizeObserver error to Cordova
+        // -------------------------------------------------------------
         NSString *msg = body[@"msg"] ?: @"";
-        if ([msg rangeOfString:@"ResizeObserver loop"].location != NSNotFound) {
+        if ([msg rangeOfString:@"ResizeObserver" options:NSCaseInsensitiveSearch].location != NSNotFound) {
             return;
         }
 
