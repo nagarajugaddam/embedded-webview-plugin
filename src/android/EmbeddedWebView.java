@@ -292,17 +292,38 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
 
                     @Override
-                    public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                        if (checkBlocked(url)) return true;
-                        return super.shouldOverrideUrlLoading(view, url);
+                public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                    return handleNavigation(view, url);
+                }
+
+                @Override
+                public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                    return handleNavigation(view, request.getUrl().toString());
+                }
+
+                private boolean handleNavigation(WebView view, String url) {
+                    // 1. Check Blocked URLs
+                    if (checkBlocked(url)) return true;
+
+                    // 2. Handle External Schemes (Tel, Mail, Maps, SMS) - MATCHES iOS LOGIC
+                    if (url.startsWith("tel:") || 
+                        url.startsWith("mailto:") || 
+                        url.startsWith("sms:") || 
+                        url.startsWith("geo:") || 
+                        url.startsWith("whatsapp:") ||
+                        url.startsWith("market:")) {
+                        try {
+                            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                            view.getContext().startActivity(intent);
+                        } catch (Exception e) {
+                            Log.e(TAG, "Error opening external app for url: " + url, e);
+                        }
+                        return true; // Stop WebView from loading this
                     }
 
-                    @Override
-                    public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                        String url = request.getUrl().toString();
-                        if (checkBlocked(url)) return true;
-                        return super.shouldOverrideUrlLoading(view, request);
-                    }
+                    // 3. Allow normal navigation
+                    return false; 
+                }
 
                     @Override
                     public void onPageStarted(WebView view, String url, Bitmap favicon) {
