@@ -49,6 +49,11 @@
     static WKProcessPool *_sharedPool = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        // Try to get the pool from the CDVViewController's existing engine if possible
+        // Otherwise, fall back to creating a new one.
+        // NOTE: The most reliable fix without private APIs is to ensure your server
+        // sends "Remember Me" (Persistent) cookies.
+        
         _sharedPool = [[WKProcessPool alloc] init];
     });
     return _sharedPool;
