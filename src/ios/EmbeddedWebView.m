@@ -161,7 +161,7 @@
                 config.allowsInlineMediaPlayback = YES;
 
                 // ----------------------------------------------------------------------------------
-                // FIX 1: ResizeObserver Throttle (Fixes 120Hz CPU Freeze)
+                // FIX 1: ResizeObserver Throttle
                 // ----------------------------------------------------------------------------------
                 NSString *resizeObserverFix = 
                     @"var _RO = window.ResizeObserver;"
@@ -180,8 +180,7 @@
                 [config.userContentController addUserScript:resizeFixScript];
                 
                 // ----------------------------------------------------------------------------------
-                // FIX 2: Aggressive Logging Interceptor (Prevents Bridge Flood)
-                // Filters ResizeObserver errors from console.log/warn/error BEFORE they leave JS
+                // FIX 2: Logging Interceptor
                 // ----------------------------------------------------------------------------------
                 NSString *debugScript =
                     @"function shouldIgnore(msg) { return msg && msg.toString().toLowerCase().indexOf('resizeobserver') !== -1; }"
@@ -207,7 +206,7 @@
                 
                 [config.userContentController addScriptMessageHandler:self name:@"consoleHandler"];
                 
-                // Cookie Logic
+                // Cookie Logic (Domain Calculation)
                 NSURL *pageURL = [NSURL URLWithString:url];
                 NSString *rawHost = pageURL.host;
                 NSString *cookieDomain = nil;
@@ -229,6 +228,7 @@
                     }
                 }
                 
+                // Inject Cookies via Javascript (Failsafe 1)
                 if (instance.cookies && instance.cookies.count > 0) {
                     NSMutableString *cookieJs = [NSMutableString string];
                     for (NSString *name in instance.cookies) {
@@ -275,7 +275,6 @@
                     [[WKWebsiteDataStore defaultDataStore] removeDataOfTypes:types modifiedSince:[NSDate dateWithTimeIntervalSince1970:0] completionHandler:^{}];
                 }
 
-
                 [webView addObserver:self forKeyPath:@"estimatedProgress" options:NSKeyValueObservingOptionNew context:nil];
                 [webView addObserver:self forKeyPath:@"canGoBack" options:NSKeyValueObservingOptionNew context:nil];
                 [webView addObserver:self forKeyPath:@"canGoForward" options:NSKeyValueObservingOptionNew context:nil];
@@ -319,6 +318,7 @@
                     }
                 }
 
+                // Header Injection (Failsafe 2)
                 if (instance.cookies && instance.cookies.count > 0) {
                     NSMutableString *cookieHeader = [NSMutableString string];
                     for (NSString *name in instance.cookies) {
@@ -361,10 +361,17 @@
                 self.lastCreatedId = instanceId;
 
                 dispatch_group_notify(cookieGroup, dispatch_get_main_queue(), ^{
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        [webView loadRequest:request];
-                        [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:@"WebView created"] callbackId:command.callbackId];
-                    });
+                    // ----------------------------------------------------------------------
+                    // FIX: READ-BACK SYNC
+                    // We force a read of all cookies. This guarantees the network process
+                    // has fully synchronized the cookie jar before we fire the request.
+                    // ----------------------------------------------------------------------
+                    [cookieStore getAllCookiesWithCompletionHandler:^(NSArray<NSHTTPCookie *> * _Nonnull cookies) {
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                            [webView loadRequest:request];
+                            [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:@"WebView created"] callbackId:command.callbackId];
+                        });
+                    }];
                 });
 
             } @catch (NSException *exception) {
