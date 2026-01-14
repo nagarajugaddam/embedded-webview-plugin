@@ -136,13 +136,13 @@
     [self.commandDelegate runInBackground:^{
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
-                // Layout
+                // --- LAYOUT CALCULATIONS ---
                 NSNumber *topOffset = options[@"top"] ?: @0;
                 NSNumber *bottomOffset = options[@"bottom"] ?: @0;
                 CGFloat safeTop = 0;
                 CGFloat safeBottom = 0;
                 
-                // Fix for keyWindow deprecation warning (iOS 13+)
+                // KeyWindow Deprecation Fix (iOS 13+)
                 UIWindow *window = nil;
                 if (@available(iOS 13.0, *)) {
                     for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -157,11 +157,7 @@
                         if (window) break;
                     }
                 }
-                // Fallback for older iOS or if scene logic fails
-                if (!window) {
-                    window = [UIApplication sharedApplication].keyWindow;
-                }
-
+                if (!window) window = [UIApplication sharedApplication].keyWindow;
                 if (window) {
                     safeTop = window.safeAreaInsets.top;
                     safeBottom = window.safeAreaInsets.bottom;
@@ -173,15 +169,13 @@
                 instance.container = [[UIView alloc] init];
                 instance.container.backgroundColor = [UIColor clearColor];
 
-                // Configuration
+                // --- CONFIGURATION ---
                 WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
                 config.processPool = [EmbeddedWebView sharedProcessPool];
                 config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
                 config.allowsInlineMediaPlayback = YES;
 
-                // ----------------------------------------------------------------------------------
-                // FIX 1: ResizeObserver Throttle
-                // ----------------------------------------------------------------------------------
+                // --- SCRIPTS: ResizeObserver Fix ---
                 NSString *resizeObserverFix = 
                     @"var _RO = window.ResizeObserver;"
                     @"if(_RO) {"
@@ -198,9 +192,7 @@
                 WKUserScript *resizeFixScript = [[WKUserScript alloc] initWithSource:resizeObserverFix injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
                 [config.userContentController addUserScript:resizeFixScript];
                 
-                // ----------------------------------------------------------------------------------
-                // FIX 2: Logging Interceptor
-                // ----------------------------------------------------------------------------------
+                // --- SCRIPTS: Console Logging ---
                 NSString *debugScript =
                     @"function shouldIgnore(msg) { return msg && msg.toString().toLowerCase().indexOf('resizeobserver') !== -1; }"
                     @"window.onerror = function(msg, url, line) {"
@@ -222,10 +214,9 @@
 
                 WKUserScript *debugUserScript = [[WKUserScript alloc] initWithSource:debugScript injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
                 [config.userContentController addUserScript:debugUserScript];
-                
                 [config.userContentController addScriptMessageHandler:self name:@"consoleHandler"];
                 
-                // Cookie Logic
+                // --- COOKIE PREPARATION ---
                 NSURL *pageURL = [NSURL URLWithString:url];
                 NSString *rawHost = pageURL.host;
                 NSString *cookieDomain = nil;
@@ -236,34 +227,25 @@
                     
                     if (numberOfMatches == 0) {
                         NSString *cleanHost = rawHost;
-                        if ([cleanHost hasPrefix:@"www."]) {
-                            cleanHost = [cleanHost substringFromIndex:4];
-                        }
-                        if (![cleanHost hasPrefix:@"."]) {
-                            cookieDomain = [NSString stringWithFormat:@".%@", cleanHost];
-                        } else {
-                            cookieDomain = cleanHost;
-                        }
+                        if ([cleanHost hasPrefix:@"www."]) cleanHost = [cleanHost substringFromIndex:4];
+                        if (![cleanHost hasPrefix:@"."]) cookieDomain = [NSString stringWithFormat:@".%@", cleanHost];
+                        else cookieDomain = cleanHost;
                     }
                 }
                 
-                // Inject Cookies via Javascript (Failsafe 1)
+                // --- INJECT COOKIES (JS Layer) ---
                 if (instance.cookies && instance.cookies.count > 0) {
                     NSMutableString *cookieJs = [NSMutableString string];
                     for (NSString *name in instance.cookies) {
                         NSString *rawVal = [instance.cookies[name] description];
                         NSString *val = [rawVal stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
-                        
                         if (cookieDomain) {
                             [cookieJs appendFormat:@"document.cookie='%@=%@; domain=%@; path=/';", name, val, cookieDomain];
                         } else {
                             [cookieJs appendFormat:@"document.cookie='%@=%@; path=/';", name, val];
                         }
                     }
-                    WKUserScript *cookieScript = [[WKUserScript alloc]
-                        initWithSource:cookieJs
-                        injectionTime:WKUserScriptInjectionTimeAtDocumentStart
-                        forMainFrameOnly:NO];
+                    WKUserScript *cookieScript = [[WKUserScript alloc] initWithSource:cookieJs injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
                     [config.userContentController addUserScript:cookieScript];
                 }
 
@@ -273,6 +255,7 @@
                     [config.userContentController addUserScript:script];
                 }
 
+                // --- WEBVIEW INIT ---
                 WKWebView *webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:config];
                 instance.webView = webView;
                 webView.navigationDelegate = self;
@@ -285,9 +268,7 @@
                     @try { [webView setValue:@YES forKey:@"inspectable"]; } @catch (NSException *e) {}
                 }
 
-                if (options[@"userAgent"]) {
-                    webView.customUserAgent = options[@"userAgent"];
-                }
+                if (options[@"userAgent"]) webView.customUserAgent = options[@"userAgent"];
                 
                 if ([options[@"clearCache"] boolValue]) {
                     NSSet *types = [NSSet setWithArray:@[WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache]];
@@ -337,7 +318,8 @@
                     }
                 }
 
-                // Header Injection (Failsafe 2)
+                // --- HEADER INJECTION (Failsafe 2) ---
+                // Manually adds Cookie header for the FIRST request (before redirects)
                 if (instance.cookies && instance.cookies.count > 0) {
                     NSMutableString *cookieHeader = [NSMutableString string];
                     for (NSString *name in instance.cookies) {
@@ -348,6 +330,7 @@
                     [request setValue:cookieHeader forHTTPHeaderField:@"Cookie"];
                 }
 
+                // --- WKHTTPCOOKIESTORE INJECTION ---
                 WKHTTPCookieStore *cookieStore = config.websiteDataStore.httpCookieStore;
                 BOOL isSecure = [url.lowercaseString hasPrefix:@"https"];
                 NSArray *cookieKeys = instance.cookies ? instance.cookies.allKeys : @[];
@@ -357,9 +340,20 @@
                     dispatch_group_enter(cookieGroup);
                     NSString *value = [[instance.cookies[name] description] copy];
                     NSMutableDictionary *props = [NSMutableDictionary dictionary];
+                    
+                    // Essential Properties
                     props[NSHTTPCookieName] = name;
                     props[NSHTTPCookieValue] = value;
                     props[NSHTTPCookiePath] = @"/";
+                    
+                    // -------------------------------------------------------------
+                    // FIX: ENHANCED PERSISTENCE AND VALIDATION
+                    // 1. OriginURL: Helps WKWebView associate cookie with the site.
+                    // 2. Expires: Forces 'Persistent' status, improving sync reliability.
+                    // -------------------------------------------------------------
+                    props[NSHTTPCookieOriginURL] = url; 
+                    props[NSHTTPCookieExpires] = [NSDate dateWithTimeIntervalSinceNow:31536000]; // +1 Year
+                    
                     if (cookieDomain) props[NSHTTPCookieDomain] = cookieDomain;
                     if (isSecure) props[NSHTTPCookieSecure] = @"TRUE";
                     if (@available(iOS 13.0, *)) {
@@ -372,6 +366,7 @@
                             dispatch_group_leave(cookieGroup);
                         }];
                     } else {
+                        NSLog(@"[EmbeddedWebView] Failed to create cookie object for %@", name);
                         dispatch_group_leave(cookieGroup);
                     }
                 }
@@ -381,8 +376,8 @@
 
                 dispatch_group_notify(cookieGroup, dispatch_get_main_queue(), ^{
                     // ----------------------------------------------------------------------
-                    // FIX: READ-BACK SYNC
-                    // We force a read of all cookies using the CORRECT Selector [getAllCookies:]
+                    // FINAL SYNC: Read-Back
+                    // Forces the network process to acknowledge the new cookies before loading.
                     // ----------------------------------------------------------------------
                     [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> * _Nonnull cookies) {
                         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
