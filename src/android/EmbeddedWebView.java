@@ -31,6 +31,7 @@ import java.util.Iterator;
 import java.util.Map;
 import android.graphics.Bitmap;
 import android.view.Gravity;
+import android.os.Handler; // Added for the delay loop
 
 import java.net.URL;
 import java.net.MalformedURLException;
@@ -212,7 +213,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
                 }
 
-                // Cookie Logic
+                // --- 2. COOKIE SETUP ---
                 String calculatedCookieDomain = null;
                 try {
                     URL uri = new URL(url);
@@ -238,7 +239,8 @@ public class EmbeddedWebView extends CordovaPlugin {
                     cookieManager.setAcceptThirdPartyCookies(webView, true);
                 }
 
-                if (options.has("cookies")) {
+                boolean hasCookiesToSet = options.has("cookies");
+                if (hasCookiesToSet) {
                     try {
                         JSONObject cookies = options.getJSONObject("cookies");
                         Iterator<String> keys = cookies.keys();
@@ -249,10 +251,16 @@ public class EmbeddedWebView extends CordovaPlugin {
                             if (cookieDomain != null) {
                                 cookieVal += "; domain=" + cookieDomain;
                             }
+                            // FIX: Android sometimes needs explicit string parsing for expiration
+                            // to treat it as persistent, but flush() usually handles it.
                             cookieManager.setCookie(url, cookieVal);
                         }
+                        
+                        // FIX: FORCE WRITE TO DISK
                         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
                             cookieManager.flush();
+                        } else {
+                            android.webkit.CookieSyncManager.getInstance().sync();
                         }
                     } catch (Exception e) {
                         Log.e(TAG, "Error setting native cookies", e);
@@ -277,9 +285,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                 progressBar.setMax(100);
                 progressBar.setVisibility(View.GONE);
 
-                // --- 2. SETUP WEBVIEW CLIENT WITH INTERCEPTION ---
                 webView.setWebViewClient(new WebViewClient() {
-                    
                     private boolean checkBlocked(String url) {
                         if (blockedUrls != null && !blockedUrls.isEmpty()) {
                             for (String blocked : blockedUrls) {
@@ -294,61 +300,35 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
 
                     @Override
-                public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                    return handleNavigation(view, url);
-                }
-
-                @Override
-                public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                    return handleNavigation(view, request.getUrl().toString());
-                }
-
-                private boolean handleNavigation(WebView view, String url) {
-                    // 1. Check Blocked URLs
-                    if (checkBlocked(url)) return true;
-
-                    // 2. Handle External Schemes
-                    // FIX: Ensure Uri and Intent are imported
-                    if (url.startsWith("tel:") || 
-                        url.startsWith("mailto:") || 
-                        url.startsWith("sms:") || 
-                        url.startsWith("geo:") || 
-                        url.startsWith("whatsapp:") ||
-                        url.startsWith("market:")) {
-                        try {
-                            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-                            view.getContext().startActivity(intent);
-                        } catch (Exception e) {
-                            Log.e(TAG, "Error opening external app for url: " + url, e);
-                        }
-                        return true; 
+                    public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                        return handleNavigation(view, url);
                     }
 
-                    // 3. Allow normal navigation
-                    return false; 
-                }
+                    @Override
+                    public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                        return handleNavigation(view, request.getUrl().toString());
+                    }
+
+                    private boolean handleNavigation(WebView view, String url) {
+                        if (checkBlocked(url)) return true;
+                        if (url.startsWith("tel:") || url.startsWith("mailto:") || url.startsWith("sms:") || url.startsWith("geo:") || url.startsWith("whatsapp:") || url.startsWith("market:")) {
+                            try {
+                                Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                                view.getContext().startActivity(intent);
+                            } catch (Exception e) {
+                                Log.e(TAG, "Error opening external app for url: " + url, e);
+                            }
+                            return true; 
+                        }
+                        return false; 
+                    }
 
                     @Override
                     public void onPageStarted(WebView view, String url, Bitmap favicon) {
                         progressBar.setVisibility(View.VISIBLE);
                         progressBar.setProgress(0);
-                        
-                        // FIX: ResizeObserver loop
-                        String resizeObserverFix = 
-                            "var _RO = window.ResizeObserver;" +
-                            "if(_RO) {" +
-                            "  window.ResizeObserver = class extends _RO {" +
-                            "    constructor(callback) {" +
-                            "      super((entries, observer) => {" +
-                            "        window.requestAnimationFrame(() => {" +
-                            "          callback(entries, observer);" +
-                            "        });" +
-                            "      });" +
-                            "    }" +
-                            "  };" +
-                            "}";
+                        String resizeObserverFix = "var _RO = window.ResizeObserver; if(_RO) { window.ResizeObserver = class extends _RO { constructor(callback) { super((entries, observer) => { window.requestAnimationFrame(() => { callback(entries, observer); }); }); } }; }";
                         view.evaluateJavascript(resizeObserverFix, null);
-
                         injectCookies(view, options, cookieDomain);
                         fireEvent(id, "loadStart", url);
                         updateNavigationState(id); 
@@ -380,57 +360,89 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
                 });
 
-                // --- 3. WEB CHROME CLIENT ---
                 webView.setWebChromeClient(new WebChromeClient() {
                     @Override
-                    public void onProgressChanged(WebView view, int newProgress) {
-                        progressBar.setProgress(newProgress);
-                    }
-
-                    // FIX: Filter console logs on Android
+                    public void onProgressChanged(WebView view, int newProgress) { progressBar.setProgress(newProgress); }
                     @Override
                     public boolean onConsoleMessage(ConsoleMessage cm) {
-                        if (cm.message() != null && cm.message().toLowerCase().contains("resizeobserver")) {
-                            return true; 
-                        }
+                        if (cm.message() != null && cm.message().toLowerCase().contains("resizeobserver")) { return true; }
                         return super.onConsoleMessage(cm);
                     }
                 });
 
-                container.addView(webView, new FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                ));
+                container.addView(webView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
                 container.addView(progressBar, progressParams);
 
-                FrameLayout.LayoutParams containerParams = new FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                );
-
+                FrameLayout.LayoutParams containerParams = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
                 containerParams.topMargin = topOffsetPx;
                 containerParams.bottomMargin = bottomOffsetPx;
 
                 rootGroup.addView(container, containerParams);
                 container.bringToFront();
 
-                if (options.has("headers")) {
-                    Map<String, String> headers = jsonToMap(options.getJSONObject("headers"));
-                    webView.loadUrl(url, headers);
-                } else {
-                    webView.loadUrl(url);
-                }
-
+                // -------------------------------------------------------------------------
+                // FIX START: ANDROID FLUSH & VERIFY LOOP
+                // We delay the loadUrl call until we confirm CookieManager has the cookies.
+                // -------------------------------------------------------------------------
+                
                 WebViewInstance instance = new WebViewInstance();
                 instance.webView = webView;
                 instance.container = container;
                 instance.progressBar = progressBar;
                 instance.blockedUrls = blockedUrls; 
-
                 instances.put(id, instance);
                 lastCreatedId = id;
 
-                callbackContext.success("WebView created successfully for id=" + id);
+                // Define the loading logic
+                Runnable loadTask = new Runnable() {
+                    int attempts = 0;
+                    @Override
+                    public void run() {
+                        String currentCookies = cookieManager.getCookie(url);
+                        boolean cookiesSynced = currentCookies != null && !currentCookies.isEmpty();
+                        
+                        // If we didn't want to set cookies, OR if we found cookies in the jar
+                        if (!hasCookiesToSet || cookiesSynced || attempts >= 10) {
+                            if (attempts >= 10) Log.w(TAG, "Cookie sync timed out on Android, forcing load.");
+                            else Log.d(TAG, "Cookies verified on Android. Loading URL.");
+                            
+                            // Load the URL
+                            if (options.has("headers")) {
+                                try {
+                                    Map<String, String> headers = jsonToMap(options.getJSONObject("headers"));
+                                    
+                                    // Manual injection for First Request (Fail-safe)
+                                    if (hasCookiesToSet && currentCookies != null) {
+                                        headers.put("Cookie", currentCookies);
+                                    }
+                                    webView.loadUrl(url, headers);
+                                } catch (JSONException e) { webView.loadUrl(url); }
+                            } else {
+                                // Manual injection for First Request (Fail-safe)
+                                if (hasCookiesToSet && currentCookies != null) {
+                                    Map<String, String> authHeader = new HashMap<>();
+                                    authHeader.put("Cookie", currentCookies);
+                                    webView.loadUrl(url, authHeader);
+                                } else {
+                                    webView.loadUrl(url);
+                                }
+                            }
+                            callbackContext.success("WebView created successfully for id=" + id);
+                        } else {
+                            // Retry
+                            attempts++;
+                            Log.d(TAG, "Waiting for Android Cookie Sync... Attempt: " + attempts);
+                            new Handler().postDelayed(this, 100);
+                        }
+                    }
+                };
+
+                // Trigger the loop
+                loadTask.run();
+
+                // -------------------------------------------------------------------------
+                // FIX END
+                // -------------------------------------------------------------------------
 
             } catch (Exception e) {
                 Log.e(TAG, "Error creating WebView", e);
@@ -466,9 +478,7 @@ public class EmbeddedWebView extends CordovaPlugin {
             WebViewInstance instance = instances.remove(id);
             if (instance != null && instance.webView != null) {
                 try {
-                    // FIX: Immediately stop loading
                     instance.webView.stopLoading();
-                    
                     if (instance.container != null) {
                         ViewGroup parent = (ViewGroup) instance.container.getParent();
                         if (parent != null) parent.removeView(instance.container);
@@ -509,12 +519,9 @@ public class EmbeddedWebView extends CordovaPlugin {
             if (instance == null) return;
             
             if (instance.container != null) {
-                // Layout Preservation
                 instance.container.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
-                
                 if (!visible) {
                     instance.webView.onPause(); 
-                    // FIX: Use cloneNode+replaceChild to reset Youtube without affecting History
                     String pauseScript = "javascript:(function(){"
                             + "try {"
                             + "  document.querySelectorAll('iframe[src*=\"youtube.com\"]').forEach(function(f){"
@@ -548,14 +555,9 @@ public class EmbeddedWebView extends CordovaPlugin {
             if (instance.webView.canGoBack()) {
                 instance.webView.goBack();
                 instance.webView.postDelayed(() -> updateNavigationState(id), 100);
-                
-                if (callbackContext != null) {
-                    callbackContext.success("Navigated back for id=" + id);
-                }
+                if (callbackContext != null) callbackContext.success("Navigated back for id=" + id);
             } else {
-                if (callbackContext != null) {
-                    callbackContext.error("Cannot go back for id=" + id);
-                }
+                if (callbackContext != null) callbackContext.error("Cannot go back for id=" + id);
             }
         });
     }
@@ -586,7 +588,6 @@ public class EmbeddedWebView extends CordovaPlugin {
             boolean newCanGoForward = instance.webView.canGoForward();
             if (newCanGoBack != instance.canGoBack) { instance.canGoBack = newCanGoBack; fireEvent(id, "canGoBackChanged", String.valueOf(instance.canGoBack)); }
             if (newCanGoForward != instance.canGoForward) { instance.canGoForward = newCanGoForward; fireEvent(id, "canGoForwardChanged", String.valueOf(instance.canGoForward)); }
-            
             try {
                 JSONObject nav = new JSONObject();
                 nav.put("canGoBack", instance.canGoBack);
@@ -599,13 +600,9 @@ public class EmbeddedWebView extends CordovaPlugin {
     private void fireEvent(String id, String eventName, String data) {
         try {
             String payload;
-            if (data != null && data.trim().startsWith("{")) {
-                payload = data; 
-            } else if (data == null) {
-                payload = "null";
-            } else {
-                payload = "\"" + data.replace("\"", "\\\"") + "\"";
-            }
+            if (data != null && data.trim().startsWith("{")) { payload = data; } 
+            else if (data == null) { payload = "null"; } 
+            else { payload = "\"" + data.replace("\"", "\\\"") + "\""; }
             String fullEventName = "embeddedwebview." + id + "." + eventName;
             String js = "javascript:cordova.fireDocumentEvent('" + fullEventName + "', {detail: " + payload + "});";
             cordova.getActivity().runOnUiThread(() -> { cordovaWebView.getView().post(() -> { try { cordovaWebView.loadUrl(js); } catch (Exception e) {} }); });
