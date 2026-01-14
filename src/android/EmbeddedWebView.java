@@ -34,6 +34,8 @@ import android.view.Gravity;
 
 import java.net.URL;
 import java.net.MalformedURLException;
+import android.content.Intent;
+import android.net.Uri;
 
 public class EmbeddedWebView extends CordovaPlugin {
 
@@ -305,7 +307,8 @@ public class EmbeddedWebView extends CordovaPlugin {
                     // 1. Check Blocked URLs
                     if (checkBlocked(url)) return true;
 
-                    // 2. Handle External Schemes (Tel, Mail, Maps, SMS) - MATCHES iOS LOGIC
+                    // 2. Handle External Schemes
+                    // FIX: Ensure Uri and Intent are imported
                     if (url.startsWith("tel:") || 
                         url.startsWith("mailto:") || 
                         url.startsWith("sms:") || 
@@ -318,7 +321,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                         } catch (Exception e) {
                             Log.e(TAG, "Error opening external app for url: " + url, e);
                         }
-                        return true; // Stop WebView from loading this
+                        return true; 
                     }
 
                     // 3. Allow normal navigation
