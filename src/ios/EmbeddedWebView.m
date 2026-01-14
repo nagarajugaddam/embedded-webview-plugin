@@ -141,13 +141,32 @@
                 NSNumber *bottomOffset = options[@"bottom"] ?: @0;
                 CGFloat safeTop = 0;
                 CGFloat safeBottom = 0;
-                if (@available(iOS 11.0, *)) {
-                    UIWindow *window = UIApplication.sharedApplication.keyWindow;
-                    if (window) {
-                        safeTop = window.safeAreaInsets.top;
-                        safeBottom = window.safeAreaInsets.bottom;
+                
+                // Fix for keyWindow deprecation warning (iOS 13+)
+                UIWindow *window = nil;
+                if (@available(iOS 13.0, *)) {
+                    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                        if (scene.activationState == UISceneActivationStateForegroundActive) {
+                            for (UIWindow *w in scene.windows) {
+                                if (w.isKeyWindow) {
+                                    window = w;
+                                    break;
+                                }
+                            }
+                        }
+                        if (window) break;
                     }
                 }
+                // Fallback for older iOS or if scene logic fails
+                if (!window) {
+                    window = [UIApplication sharedApplication].keyWindow;
+                }
+
+                if (window) {
+                    safeTop = window.safeAreaInsets.top;
+                    safeBottom = window.safeAreaInsets.bottom;
+                }
+
                 CGFloat finalTopMargin = safeTop + [topOffset floatValue];
                 CGFloat finalBottomMargin = safeBottom + [bottomOffset floatValue];
 
@@ -206,7 +225,7 @@
                 
                 [config.userContentController addScriptMessageHandler:self name:@"consoleHandler"];
                 
-                // Cookie Logic (Domain Calculation)
+                // Cookie Logic
                 NSURL *pageURL = [NSURL URLWithString:url];
                 NSString *rawHost = pageURL.host;
                 NSString *cookieDomain = nil;
@@ -363,10 +382,9 @@
                 dispatch_group_notify(cookieGroup, dispatch_get_main_queue(), ^{
                     // ----------------------------------------------------------------------
                     // FIX: READ-BACK SYNC
-                    // We force a read of all cookies. This guarantees the network process
-                    // has fully synchronized the cookie jar before we fire the request.
+                    // We force a read of all cookies using the CORRECT Selector [getAllCookies:]
                     // ----------------------------------------------------------------------
-                    [cookieStore getAllCookiesWithCompletionHandler:^(NSArray<NSHTTPCookie *> * _Nonnull cookies) {
+                    [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> * _Nonnull cookies) {
                         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                             [webView loadRequest:request];
                             [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:@"WebView created"] callbackId:command.callbackId];
