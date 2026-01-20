@@ -19,6 +19,7 @@
 @property (nonatomic, assign) BOOL canGoForward;
 @property (nonatomic, strong) NSDictionary *cookies;
 @property (nonatomic, strong) NSArray *blockedUrls; 
+@property (nonatomic, strong) NSArray *historySkipUrls; 
 @end
 
 @implementation EmbeddedWebViewInstance
@@ -113,6 +114,10 @@
     
     if ([options[@"blockedUrls"] isKindOfClass:[NSArray class]]) {
         instance.blockedUrls = options[@"blockedUrls"];
+    }
+
+    if ([options[@"historySkipUrls"] isKindOfClass:[NSArray class]]) {
+        instance.historySkipUrls = options[@"historySkipUrls"];
     }
 
     if (!instanceId || instanceId.length == 0) {
@@ -483,22 +488,67 @@
         }
     });
 }
+
 - (void)goBack:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     dispatch_async(dispatch_get_main_queue(), ^{
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
         
-        if (instance) {
+        if (instance && instance.webView) {
             if ([instance.webView isLoading]) {
                 [instance.webView stopLoading];
             }
-            if ([instance.webView canGoBack]) {
-                [instance.webView goBack];
+
+            WKBackForwardList *historyList = instance.webView.backForwardList;
+            
+            // If no skip list is defined, do standard behavior
+            if (!instance.historySkipUrls || instance.historySkipUrls.count == 0) {
+                if ([instance.webView canGoBack]) {
+                    [instance.webView goBack];
+                }
+                [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
+                return;
             }
+
+            // --- SMART SKIP LOGIC ---
+            WKBackForwardListItem *targetItem = nil;
+            
+            // Loop backwards starting from the item immediately behind current
+            for (NSInteger i = historyList.backList.count - 1; i >= 0; i--) {
+                WKBackForwardListItem *item = historyList.backList[i];
+                NSString *urlStr = item.URL.absoluteString;
+                
+                BOOL shouldSkip = NO;
+                for (NSString *skipUrl in instance.historySkipUrls) {
+                    if ([urlStr containsString:skipUrl]) {
+                        shouldSkip = YES;
+                        break;
+                    }
+                }
+                
+                if (!shouldSkip) {
+                    targetItem = item;
+                    break; // Found the first safe page!
+                }
+            }
+
+            if (targetItem) {
+                [instance.webView goToBackForwardListItem:targetItem];
+            } else {
+                // If we skipped everything and found nothing, or list was empty
+                if ([instance.webView canGoBack]) {
+                    [instance.webView goBack];
+                }
+            }
+            // ------------------------
+
             [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
         }
     });
 }
+
+
+
 - (void)goForward:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -509,14 +559,51 @@
         }
     });
 }
+
 - (void)canGoBack:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     dispatch_async(dispatch_get_main_queue(), ^{
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
         if (instance) {
-            [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsBool:[instance.webView canGoBack]] callbackId:command.callbackId];
+            // Use the smart check
+            BOOL effectiveCanGoBack = [self isEffectiveGoBackAvailable:instance];
+            [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsBool:effectiveCanGoBack] callbackId:command.callbackId];
         }
     });
+}
+
+- (BOOL)isEffectiveGoBackAvailable:(EmbeddedWebViewInstance *)instance {
+    if (!instance || !instance.webView) return NO;
+    
+    // If native says no, it's definitely no
+    if (![instance.webView canGoBack]) return NO;
+    
+    // If no skip list, trust native
+    if (!instance.historySkipUrls || instance.historySkipUrls.count == 0) return YES;
+    
+    // Check history stack
+    WKBackForwardList *list = instance.webView.backForwardList;
+    
+    // Look for at least ONE page in the back history that isn't skipped
+    for (WKBackForwardListItem *item in list.backList) {
+        NSString *url = item.URL.absoluteString;
+        BOOL isSkipped = NO;
+        
+        for (NSString *skip in instance.historySkipUrls) {
+            if ([url containsString:skip]) {
+                isSkipped = YES;
+                break;
+            }
+        }
+        
+        // If we found a page that is NOT skipped, Back is available
+        if (!isSkipped) {
+            return YES;
+        }
+    }
+    
+    // If we looped through everything and it was all skipped URLs
+    return NO;
 }
 
 - (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
@@ -683,8 +770,11 @@
 - (void)updateNavigationStateForInstanceId:(NSString *)instanceId {
     EmbeddedWebViewInstance *instance = self.instances[instanceId];
     if (!instance || !instance.webView) return;
-    BOOL newCanGoBack = [instance.webView canGoBack];
+    
+    // Use the smart check instead of standard [webView canGoBack]
+    BOOL newCanGoBack = [self isEffectiveGoBackAvailable:instance];
     BOOL newCanGoForward = [instance.webView canGoForward];
+    
     if (newCanGoBack != instance.canGoBack) {
         instance.canGoBack = newCanGoBack;
         [self fireEvent:@"canGoBackChanged" forInstanceId:instanceId withData:instance.canGoBack ? @"true" : @"false"];
