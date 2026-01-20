@@ -771,22 +771,45 @@
     EmbeddedWebViewInstance *instance = self.instances[instanceId];
     if (!instance || !instance.webView) return;
     
-    // Use the smart check instead of standard [webView canGoBack]
+    // 1. Calculate Status
     BOOL newCanGoBack = [self isEffectiveGoBackAvailable:instance];
     BOOL newCanGoForward = [instance.webView canGoForward];
     
+    // 2. Get Current URL
+    NSString *currentUrl = instance.webView.URL.absoluteString ?: @"";
+    
+    // 3. Fire canGoBackChanged (if changed)
     if (newCanGoBack != instance.canGoBack) {
         instance.canGoBack = newCanGoBack;
-        [self fireEvent:@"canGoBackChanged" forInstanceId:instanceId withData:instance.canGoBack ? @"true" : @"false"];
-    }
-    if (newCanGoForward != instance.canGoForward) {
-        instance.canGoForward = newCanGoForward;
-        [self fireEvent:@"canGoForwardChanged" forInstanceId:instanceId withData:instance.canGoForward ? @"true" : @"false"];
+        
+        // Construct JSON Payload: { "value": true/false, "url": "https://..." }
+        NSDictionary *eventData = @{
+            @"value": @(instance.canGoBack),
+            @"url": currentUrl
+        };
+        NSString *jsonData = [self jsonStringFromDictionary:eventData];
+        
+        [self fireEvent:@"canGoBackChanged" forInstanceId:instanceId withData:jsonData];
     }
     
+    // 4. Fire canGoForwardChanged (if changed)
+    if (newCanGoForward != instance.canGoForward) {
+        instance.canGoForward = newCanGoForward;
+        
+        NSDictionary *eventData = @{
+            @"value": @(instance.canGoForward),
+            @"url": currentUrl
+        };
+        NSString *jsonData = [self jsonStringFromDictionary:eventData];
+        
+        [self fireEvent:@"canGoForwardChanged" forInstanceId:instanceId withData:jsonData];
+    }
+    
+    // 5. Fire generic navigationStateChanged (Always fires logic, usually redundant)
     NSDictionary *navDict = @{
         @"canGoBack": @(instance.canGoBack),
-        @"canGoForward": @(instance.canGoForward)
+        @"canGoForward": @(instance.canGoForward),
+        @"url": currentUrl
     };
     NSString *navState = [self jsonStringFromDictionary:navDict];
     [self fireEvent:@"navigationStateChanged" forInstanceId:instanceId withData:navState];

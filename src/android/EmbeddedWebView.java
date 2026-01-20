@@ -31,7 +31,7 @@ import java.util.Iterator;
 import java.util.Map;
 import android.graphics.Bitmap;
 import android.view.Gravity;
-import android.os.Handler; // Added for the delay loop
+import android.os.Handler; 
 
 import java.net.URL;
 import java.net.MalformedURLException;
@@ -49,6 +49,7 @@ public class EmbeddedWebView extends CordovaPlugin {
         boolean canGoBack = false;
         boolean canGoForward = false;
         List<String> blockedUrls;
+        List<String> historySkipUrls; // <--- ADDED SKIP LIST
     }
 
     private final Map<String, WebViewInstance> instances = new HashMap<>();
@@ -124,12 +125,10 @@ public class EmbeddedWebView extends CordovaPlugin {
             return false;
         }
         WebViewInstance instance = instances.get(lastCreatedId);
-        if (instance != null && instance.webView != null && instance.webView.canGoBack()) {
-            cordova.getActivity().runOnUiThread(() -> {
-                instance.webView.goBack();
-                Log.d(TAG, "Back button intercepted - navigated back in WebView (id=" + lastCreatedId + ")");
-                updateNavigationState(lastCreatedId);
-            });
+        // Use smart check here too
+        if (instance != null && instance.webView != null && isEffectiveGoBackAvailable(instance)) {
+            // Forward to the goBack method which handles the skipping logic
+            this.goBack(lastCreatedId, null);
             return true;
         }
         return false;
@@ -213,7 +212,16 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
                 }
 
-                // --- 2. COOKIE SETUP ---
+                // --- 2. PARSE SKIP URLS (NEW) ---
+                final List<String> historySkipUrls = new ArrayList<>();
+                if (options.has("historySkipUrls")) {
+                    JSONArray skipArr = options.getJSONArray("historySkipUrls");
+                    for (int i = 0; i < skipArr.length(); i++) {
+                        historySkipUrls.add(skipArr.getString(i));
+                    }
+                }
+
+                // --- 3. COOKIE SETUP ---
                 String calculatedCookieDomain = null;
                 try {
                     URL uri = new URL(url);
@@ -251,12 +259,8 @@ public class EmbeddedWebView extends CordovaPlugin {
                             if (cookieDomain != null) {
                                 cookieVal += "; domain=" + cookieDomain;
                             }
-                            // FIX: Android sometimes needs explicit string parsing for expiration
-                            // to treat it as persistent, but flush() usually handles it.
                             cookieManager.setCookie(url, cookieVal);
                         }
-                        
-                        // FIX: FORCE WRITE TO DISK
                         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
                             cookieManager.flush();
                         } else {
@@ -381,19 +385,17 @@ public class EmbeddedWebView extends CordovaPlugin {
                 container.bringToFront();
 
                 // -------------------------------------------------------------------------
-                // FIX START: ANDROID FLUSH & VERIFY LOOP
-                // We delay the loadUrl call until we confirm CookieManager has the cookies.
+                // COOKIE FLUSH & VERIFY LOOP
                 // -------------------------------------------------------------------------
-                
                 WebViewInstance instance = new WebViewInstance();
                 instance.webView = webView;
                 instance.container = container;
                 instance.progressBar = progressBar;
                 instance.blockedUrls = blockedUrls; 
+                instance.historySkipUrls = historySkipUrls; // Save the skip list
                 instances.put(id, instance);
                 lastCreatedId = id;
 
-                // Define the loading logic
                 Runnable loadTask = new Runnable() {
                     int attempts = 0;
                     @Override
@@ -401,24 +403,19 @@ public class EmbeddedWebView extends CordovaPlugin {
                         String currentCookies = cookieManager.getCookie(url);
                         boolean cookiesSynced = currentCookies != null && !currentCookies.isEmpty();
                         
-                        // If we didn't want to set cookies, OR if we found cookies in the jar
                         if (!hasCookiesToSet || cookiesSynced || attempts >= 10) {
                             if (attempts >= 10) Log.w(TAG, "Cookie sync timed out on Android, forcing load.");
                             else Log.d(TAG, "Cookies verified on Android. Loading URL.");
                             
-                            // Load the URL
                             if (options.has("headers")) {
                                 try {
                                     Map<String, String> headers = jsonToMap(options.getJSONObject("headers"));
-                                    
-                                    // Manual injection for First Request (Fail-safe)
                                     if (hasCookiesToSet && currentCookies != null) {
                                         headers.put("Cookie", currentCookies);
                                     }
                                     webView.loadUrl(url, headers);
                                 } catch (JSONException e) { webView.loadUrl(url); }
                             } else {
-                                // Manual injection for First Request (Fail-safe)
                                 if (hasCookiesToSet && currentCookies != null) {
                                     Map<String, String> authHeader = new HashMap<>();
                                     authHeader.put("Cookie", currentCookies);
@@ -429,20 +426,13 @@ public class EmbeddedWebView extends CordovaPlugin {
                             }
                             callbackContext.success("WebView created successfully for id=" + id);
                         } else {
-                            // Retry
                             attempts++;
                             Log.d(TAG, "Waiting for Android Cookie Sync... Attempt: " + attempts);
                             new Handler().postDelayed(this, 100);
                         }
                     }
                 };
-
-                // Trigger the loop
                 loadTask.run();
-
-                // -------------------------------------------------------------------------
-                // FIX END
-                // -------------------------------------------------------------------------
 
             } catch (Exception e) {
                 Log.e(TAG, "Error creating WebView", e);
@@ -545,22 +535,62 @@ public class EmbeddedWebView extends CordovaPlugin {
             if (instance != null) { instance.webView.reload(); if (callbackContext != null) callbackContext.success("Reloaded"); }
         });
     }
-   private void goBack(final String id, final CallbackContext callbackContext) {
+    
+    // --- SMART BACK LOGIC ---
+
+    private void goBack(final String id, final CallbackContext callbackContext) {
         cordova.getActivity().runOnUiThread(() -> {
             WebViewInstance instance = getInstance(id, callbackContext);
             if (instance == null) return;
 
             instance.webView.stopLoading();
 
+            // 1. Check if we need to skip pages
+            if (instance.historySkipUrls != null && !instance.historySkipUrls.isEmpty()) {
+                android.webkit.WebBackForwardList history = instance.webView.copyBackForwardList();
+                int currIndex = history.getCurrentIndex();
+                int stepsToGoBack = 0;
+                boolean foundSafePage = false;
+
+                // Look backwards
+                for (int i = currIndex - 1; i >= 0; i--) {
+                    String url = history.getItemAtIndex(i).getUrl();
+                    boolean isSkipped = false;
+                    for (String skip : instance.historySkipUrls) {
+                        if (url.contains(skip)) {
+                            isSkipped = true;
+                            break;
+                        }
+                    }
+
+                    if (!isSkipped) {
+                        stepsToGoBack = i - currIndex; // This will be negative (e.g. -2)
+                        foundSafePage = true;
+                        break;
+                    }
+                }
+
+                if (foundSafePage) {
+                    instance.webView.goBackOrForward(stepsToGoBack);
+                    Log.d(TAG, "Smart Skip - Jumping back " + stepsToGoBack + " steps.");
+                    final String finalId = id; 
+                    instance.webView.postDelayed(() -> updateNavigationState(finalId), 200);
+                    if (callbackContext != null) callbackContext.success("Navigated back (Smart)");
+                    return;
+                }
+            }
+
+            // 2. Fallback to normal
             if (instance.webView.canGoBack()) {
                 instance.webView.goBack();
                 instance.webView.postDelayed(() -> updateNavigationState(id), 100);
-                if (callbackContext != null) callbackContext.success("Navigated back for id=" + id);
+                if (callbackContext != null) callbackContext.success("Navigated back");
             } else {
                 if (callbackContext != null) callbackContext.error("Cannot go back for id=" + id);
             }
         });
     }
+
     private void goForward(final String id, final CallbackContext callbackContext) {
         cordova.getActivity().runOnUiThread(() -> {
             WebViewInstance instance = getInstance(id, callbackContext);
@@ -568,30 +598,96 @@ public class EmbeddedWebView extends CordovaPlugin {
             else if (callbackContext != null) callbackContext.error("Cannot go forward");
         });
     }
+
+    // --- HELPER: CHECK EFFECTIVE BACK STATUS ---
+    private boolean isEffectiveGoBackAvailable(WebViewInstance instance) {
+        if (instance == null || instance.webView == null) return false;
+        
+        // Basic check
+        if (!instance.webView.canGoBack()) return false;
+        
+        // If no skip list, basic check is enough
+        if (instance.historySkipUrls == null || instance.historySkipUrls.isEmpty()) return true;
+        
+        android.webkit.WebBackForwardList history = instance.webView.copyBackForwardList();
+        int currIndex = history.getCurrentIndex();
+        
+        // Loop backward to see if there is ANY page that isn't skipped
+        for (int i = currIndex - 1; i >= 0; i--) {
+            String url = history.getItemAtIndex(i).getUrl();
+            boolean isSkipped = false;
+            for (String skip : instance.historySkipUrls) {
+                if (url.contains(skip)) {
+                    isSkipped = true;
+                    break;
+                }
+            }
+            // Found a valid page!
+            if (!isSkipped) return true;
+        }
+        
+        return false;
+    }
+
     private void canGoBack(final String id, final CallbackContext callbackContext) {
         cordova.getActivity().runOnUiThread(() -> {
             WebViewInstance instance = getInstance(id, callbackContext);
-            if (instance != null) { if (callbackContext != null) callbackContext.success(instance.webView.canGoBack() ? 1 : 0); }
+            if (instance != null) { 
+                // Use the smart check
+                boolean effective = isEffectiveGoBackAvailable(instance);
+                if (callbackContext != null) callbackContext.success(effective ? 1 : 0); 
+            }
         });
     }
+
     private Map<String, String> jsonToMap(JSONObject json) throws JSONException {
         Map<String, String> map = new HashMap<>();
         Iterator<String> keys = json.keys();
         while (keys.hasNext()) { String key = keys.next(); map.put(key, json.getString(key)); }
         return map;
     }
+
     private void updateNavigationState(final String id) {
         cordova.getActivity().runOnUiThread(() -> {
             WebViewInstance instance = instances.get(id);
             if (instance == null || instance.webView == null) return;
-            boolean newCanGoBack = instance.webView.canGoBack();
+            
+            // 1. Calculate Status
+            boolean newCanGoBack = isEffectiveGoBackAvailable(instance);
             boolean newCanGoForward = instance.webView.canGoForward();
-            if (newCanGoBack != instance.canGoBack) { instance.canGoBack = newCanGoBack; fireEvent(id, "canGoBackChanged", String.valueOf(instance.canGoBack)); }
-            if (newCanGoForward != instance.canGoForward) { instance.canGoForward = newCanGoForward; fireEvent(id, "canGoForwardChanged", String.valueOf(instance.canGoForward)); }
+            
+            // 2. Get Current URL
+            String currentUrl = instance.webView.getUrl();
+            if (currentUrl == null) currentUrl = "";
+
+            // 3. Fire canGoBackChanged (Updated to include URL JSON)
+            if (newCanGoBack != instance.canGoBack) { 
+                instance.canGoBack = newCanGoBack; 
+                try {
+                    JSONObject data = new JSONObject();
+                    data.put("value", instance.canGoBack);
+                    data.put("url", currentUrl);
+                    fireEvent(id, "canGoBackChanged", data.toString()); 
+                } catch (JSONException ignored) {}
+            }
+
+            // 4. Fire canGoForwardChanged (Updated to include URL JSON)
+            if (newCanGoForward != instance.canGoForward) { 
+                instance.canGoForward = newCanGoForward; 
+                try {
+                    JSONObject data = new JSONObject();
+                    data.put("value", instance.canGoForward);
+                    data.put("url", currentUrl);
+                    fireEvent(id, "canGoForwardChanged", data.toString()); 
+                } catch (JSONException ignored) {}
+            }
+            
+            // 5. Fire generic navigationStateChanged
             try {
                 JSONObject nav = new JSONObject();
                 nav.put("canGoBack", instance.canGoBack);
                 nav.put("canGoForward", instance.canGoForward);
+                nav.put("url", currentUrl);
                 fireEvent(id, "navigationStateChanged", nav.toString());
             } catch (JSONException ignored) {}
         });
