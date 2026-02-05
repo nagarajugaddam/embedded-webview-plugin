@@ -278,10 +278,8 @@ public class EmbeddedWebView extends CordovaPlugin {
                     progressBar.getProgressDrawable().setColorFilter(Color.parseColor(progressColor), PorterDuff.Mode.SRC_IN);
                 } catch (Exception ignored) {}
 
-                // --- MODIFICATION START: Double thickness ---
-                // Previous default was 5, new default is 10
+                // Default thickness 10
                 int progressHeightDp = options.optInt("progressHeight", 10);
-                // --- MODIFICATION END ---
                 
                 int progressHeightPx = (int) (progressHeightDp * density);
 
@@ -334,9 +332,17 @@ public class EmbeddedWebView extends CordovaPlugin {
                     @Override
                     public void onPageStarted(WebView view, String url, Bitmap favicon) {
                         progressBar.setVisibility(View.VISIBLE);
-                        // --- MODIFICATION START: Set default 15% ---
-                        progressBar.setProgress(15);
-                        // --- MODIFICATION END ---
+                        
+                        // --- FIX START: Prevent backward sliding animation ---
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                            progressBar.setProgress(0, false);  // Instant Reset
+                            progressBar.setProgress(15, true);  // Animate to 15
+                        } else {
+                            progressBar.setProgress(0);
+                            progressBar.setProgress(15);
+                        }
+                        // --- FIX END ---
+                        
                         String resizeObserverFix = "var _RO = window.ResizeObserver; if(_RO) { window.ResizeObserver = class extends _RO { constructor(callback) { super((entries, observer) => { window.requestAnimationFrame(() => { callback(entries, observer); }); }); } }; }";
                         view.evaluateJavascript(resizeObserverFix, null);
                         injectCookies(view, options, cookieDomain);
@@ -352,7 +358,12 @@ public class EmbeddedWebView extends CordovaPlugin {
 
                     @Override
                     public void onPageFinished(WebView view, String url) {
-                        progressBar.setProgress(100);
+                        // Ensure it finishes filling up
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                            progressBar.setProgress(100, true);
+                        } else {
+                            progressBar.setProgress(100);
+                        }
                         progressBar.postDelayed(() -> progressBar.setVisibility(View.GONE), 200);
                         injectCookies(view, options, cookieDomain);
                         updateNavigationState(id);
@@ -372,7 +383,16 @@ public class EmbeddedWebView extends CordovaPlugin {
 
                 webView.setWebChromeClient(new WebChromeClient() {
                     @Override
-                    public void onProgressChanged(WebView view, int newProgress) { progressBar.setProgress(newProgress); }
+                    public void onProgressChanged(WebView view, int newProgress) { 
+                        // --- FIX START: Logic to mimic "animated: NO" for backward jumps ---
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                            boolean animate = newProgress > progressBar.getProgress();
+                            progressBar.setProgress(newProgress, animate);
+                        } else {
+                            progressBar.setProgress(newProgress);
+                        }
+                        // --- FIX END ---
+                    }
                     @Override
                     public boolean onConsoleMessage(ConsoleMessage cm) {
                         if (cm.message() != null && cm.message().toLowerCase().contains("resizeobserver")) { return true; }

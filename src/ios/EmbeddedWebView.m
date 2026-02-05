@@ -250,10 +250,8 @@
                 webView.translatesAutoresizingMaskIntoConstraints = NO;
                 progressBar.translatesAutoresizingMaskIntoConstraints = NO;
                 
-                // --- MODIFICATION START: Double thickness ---
-                // Previous default was 5.0, new default is 10.0
+                // Double thickness (10.0)
                 CGFloat ph = [options[@"progressHeight"] floatValue] ?: 10.0;
-                // --- MODIFICATION END ---
 
                 [NSLayoutConstraint activateConstraints:@[
                     [instance.container.leadingAnchor constraintEqualToAnchor:mainView.leadingAnchor],
@@ -702,9 +700,12 @@
         EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
         if (instance) {
             instance.progressBar.hidden = NO;
-            // --- MODIFICATION START: Set default 15% ---
-            [instance.progressBar setProgress:0.15 animated:NO];
-            // --- MODIFICATION END ---
+            // --- FIX START: Prevent backward animation ---
+            // 1. Instantly reset to 0 (no animation) to clear the "full" bar
+            [instance.progressBar setProgress:0.0 animated:NO];
+            // 2. Then set to default 15% (can animate this forward)
+            [instance.progressBar setProgress:0.15 animated:YES];
+            // --- FIX END ---
             [self fireEvent:@"loadStart" forInstanceId:instanceId withData:webView.URL.absoluteString];
         }
     });
@@ -755,7 +756,14 @@
         EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
         if (instance && instance.progressBar) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                [instance.progressBar setProgress:webView.estimatedProgress animated:YES];
+                // --- FIX START: Check for backward movement ---
+                // If new progress is LESS than current (e.g. 1.0 -> 0.1), do NOT animate.
+                if (webView.estimatedProgress < instance.progressBar.progress) {
+                    [instance.progressBar setProgress:webView.estimatedProgress animated:NO];
+                } else {
+                    [instance.progressBar setProgress:webView.estimatedProgress animated:YES];
+                }
+                // --- FIX END ---
             });
         }
     } 
