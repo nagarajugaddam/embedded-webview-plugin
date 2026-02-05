@@ -699,13 +699,19 @@
         NSString *instanceId = [self instanceIdForWebView:webView];
         EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
         if (instance) {
-            instance.progressBar.hidden = NO;
             // --- FIX START: Prevent backward animation ---
-            // 1. Instantly reset to 0 (no animation) to clear the "full" bar
+            // 1. Reset to 0 first (silently)
             [instance.progressBar setProgress:0.0 animated:NO];
-            // 2. Then set to default 15% (can animate this forward)
-            [instance.progressBar setProgress:0.15 animated:YES];
+            
+            // 2. Start at 15% instantly (no animation).
+            // This ensures it appears at 15% immediately when shown,
+            // preventing any interpolation from a previous 100% state.
+            [instance.progressBar setProgress:0.15 animated:NO];
+            
+            // 3. Make visible now that value is correct
+            instance.progressBar.hidden = NO;
             // --- FIX END ---
+            
             [self fireEvent:@"loadStart" forInstanceId:instanceId withData:webView.URL.absoluteString];
         }
     });

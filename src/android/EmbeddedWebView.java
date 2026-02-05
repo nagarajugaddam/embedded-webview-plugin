@@ -335,8 +335,11 @@ public class EmbeddedWebView extends CordovaPlugin {
                         
                         // --- FIX START: Prevent backward sliding animation ---
                         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-                            progressBar.setProgress(0, false);  // Instant Reset
-                            progressBar.setProgress(15, true);  // Animate to 15
+                            // 1. Reset to 0 instantly
+                            progressBar.setProgress(0, false);
+                            
+                            // 2. Set to 15 instantly (no animation) to avoid slide-back effect
+                            progressBar.setProgress(15, false); 
                         } else {
                             progressBar.setProgress(0);
                             progressBar.setProgress(15);
