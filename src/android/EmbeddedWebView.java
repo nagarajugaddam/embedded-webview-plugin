@@ -278,7 +278,11 @@ public class EmbeddedWebView extends CordovaPlugin {
                     progressBar.getProgressDrawable().setColorFilter(Color.parseColor(progressColor), PorterDuff.Mode.SRC_IN);
                 } catch (Exception ignored) {}
 
-                int progressHeightDp = options.optInt("progressHeight", 5);
+                // --- MODIFICATION START: Double thickness ---
+                // Previous default was 5, new default is 10
+                int progressHeightDp = options.optInt("progressHeight", 10);
+                // --- MODIFICATION END ---
+                
                 int progressHeightPx = (int) (progressHeightDp * density);
 
                 FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(
@@ -330,7 +334,9 @@ public class EmbeddedWebView extends CordovaPlugin {
                     @Override
                     public void onPageStarted(WebView view, String url, Bitmap favicon) {
                         progressBar.setVisibility(View.VISIBLE);
-                        progressBar.setProgress(0);
+                        // --- MODIFICATION START: Set default 15% ---
+                        progressBar.setProgress(15);
+                        // --- MODIFICATION END ---
                         String resizeObserverFix = "var _RO = window.ResizeObserver; if(_RO) { window.ResizeObserver = class extends _RO { constructor(callback) { super((entries, observer) => { window.requestAnimationFrame(() => { callback(entries, observer); }); }); } }; }";
                         view.evaluateJavascript(resizeObserverFix, null);
                         injectCookies(view, options, cookieDomain);

@@ -249,7 +249,11 @@
                 instance.container.translatesAutoresizingMaskIntoConstraints = NO;
                 webView.translatesAutoresizingMaskIntoConstraints = NO;
                 progressBar.translatesAutoresizingMaskIntoConstraints = NO;
-                CGFloat ph = [options[@"progressHeight"] floatValue] ?: 5.0;
+                
+                // --- MODIFICATION START: Double thickness ---
+                // Previous default was 5.0, new default is 10.0
+                CGFloat ph = [options[@"progressHeight"] floatValue] ?: 10.0;
+                // --- MODIFICATION END ---
 
                 [NSLayoutConstraint activateConstraints:@[
                     [instance.container.leadingAnchor constraintEqualToAnchor:mainView.leadingAnchor],
@@ -698,7 +702,9 @@
         EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
         if (instance) {
             instance.progressBar.hidden = NO;
-            [instance.progressBar setProgress:0.0 animated:NO];
+            // --- MODIFICATION START: Set default 15% ---
+            [instance.progressBar setProgress:0.15 animated:NO];
+            // --- MODIFICATION END ---
             [self fireEvent:@"loadStart" forInstanceId:instanceId withData:webView.URL.absoluteString];
         }
     });
