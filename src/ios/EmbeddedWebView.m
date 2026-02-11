@@ -755,6 +755,7 @@
     }
     return nil;
 }
+
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context {
     if ([keyPath isEqualToString:@"estimatedProgress"]) {
         WKWebView *webView = (WKWebView *)object;
@@ -762,17 +763,36 @@
         EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
         if (instance && instance.progressBar) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                // --- FIX START: Check for backward movement ---
-                // If new progress is LESS than current (e.g. 1.0 -> 0.1), do NOT animate.
+                // Existing animation logic
                 if (webView.estimatedProgress < instance.progressBar.progress) {
                     [instance.progressBar setProgress:webView.estimatedProgress animated:NO];
                 } else {
                     [instance.progressBar setProgress:webView.estimatedProgress animated:YES];
                 }
-                // --- FIX END ---
+                
+                // --- FIX 1: If it hits 100% via KVO, hide it (redundancy for didFinishNavigation) ---
+                if (webView.estimatedProgress >= 1.0) {
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        instance.progressBar.hidden = YES;
+                    });
+                }
             });
         }
     } 
+    // --- FIX 2: The "Loading" Observer (Silver Bullet for Back Navigation) ---
+    else if ([keyPath isEqualToString:@"loading"]) {
+        WKWebView *webView = (WKWebView *)object;
+        NSString *instanceId = [self instanceIdForWebView:webView];
+        EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
+        
+        // If loading just flipped to false, force hide the bar immediately.
+        if (instance && !webView.loading) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                instance.progressBar.hidden = YES;
+                [instance.progressBar setProgress:0.0 animated:NO]; // Reset for next time
+            });
+        }
+    }
     else if ([keyPath isEqualToString:@"canGoBack"] || [keyPath isEqualToString:@"canGoForward"]) {
         WKWebView *webView = (WKWebView *)object;
         NSString *instanceId = [self instanceIdForWebView:webView];

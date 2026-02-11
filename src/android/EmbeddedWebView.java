@@ -384,18 +384,27 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
                 });
 
-                webView.setWebChromeClient(new WebChromeClient() {
-                    @Override
+                 @Override
                     public void onProgressChanged(WebView view, int newProgress) { 
-                        // --- FIX START: Logic to mimic "animated: NO" for backward jumps ---
+                        // 1. Update the progress value (Keep your existing animation logic)
                         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
                             boolean animate = newProgress > progressBar.getProgress();
                             progressBar.setProgress(newProgress, animate);
                         } else {
                             progressBar.setProgress(newProgress);
                         }
-                        // --- FIX END ---
+
+                        // 2. THE FIX: Control visibility here. 
+                        // cached back-navigations often skip onPageFinished, but they usually hit progress 100.
+                        if (newProgress == 100) {
+                            progressBar.setVisibility(View.GONE);
+                        } else {
+                            if (progressBar.getVisibility() == View.GONE) {
+                                progressBar.setVisibility(View.VISIBLE);
+                            }
+                        }
                     }
+
                     @Override
                     public boolean onConsoleMessage(ConsoleMessage cm) {
                         if (cm.message() != null && cm.message().toLowerCase().contains("resizeobserver")) { return true; }
