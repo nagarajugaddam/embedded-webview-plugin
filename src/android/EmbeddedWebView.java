@@ -49,7 +49,7 @@ public class EmbeddedWebView extends CordovaPlugin {
         boolean canGoBack = false;
         boolean canGoForward = false;
         List<String> blockedUrls;
-        List<String> historySkipUrls; // <--- ADDED SKIP LIST
+        List<String> historySkipUrls;
     }
 
     private final Map<String, WebViewInstance> instances = new HashMap<>();
@@ -125,9 +125,7 @@ public class EmbeddedWebView extends CordovaPlugin {
             return false;
         }
         WebViewInstance instance = instances.get(lastCreatedId);
-        // Use smart check here too
         if (instance != null && instance.webView != null && isEffectiveGoBackAvailable(instance)) {
-            // Forward to the goBack method which handles the skipping logic
             this.goBack(lastCreatedId, null);
             return true;
         }
@@ -212,7 +210,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
                 }
 
-                // --- 2. PARSE SKIP URLS (NEW) ---
+                // --- 2. PARSE SKIP URLS ---
                 final List<String> historySkipUrls = new ArrayList<>();
                 if (options.has("historySkipUrls")) {
                     JSONArray skipArr = options.getJSONArray("historySkipUrls");
@@ -280,7 +278,6 @@ public class EmbeddedWebView extends CordovaPlugin {
 
                 // Default thickness 10
                 int progressHeightDp = options.optInt("progressHeight", 10);
-                
                 int progressHeightPx = (int) (progressHeightDp * density);
 
                 FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(
@@ -291,6 +288,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                 progressBar.setMax(100);
                 progressBar.setVisibility(View.GONE);
 
+                // --- WEBVIEW CLIENT ---
                 webView.setWebViewClient(new WebViewClient() {
                     private boolean checkBlocked(String url) {
                         if (blockedUrls != null && !blockedUrls.isEmpty()) {
@@ -333,18 +331,14 @@ public class EmbeddedWebView extends CordovaPlugin {
                     public void onPageStarted(WebView view, String url, Bitmap favicon) {
                         progressBar.setVisibility(View.VISIBLE);
                         
-                        // --- FIX START: Prevent backward sliding animation ---
+                        // Prevent backward sliding animation
                         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-                            // 1. Reset to 0 instantly
                             progressBar.setProgress(0, false);
-                            
-                            // 2. Set to 15 instantly (no animation) to avoid slide-back effect
                             progressBar.setProgress(15, false); 
                         } else {
                             progressBar.setProgress(0);
                             progressBar.setProgress(15);
                         }
-                        // --- FIX END ---
                         
                         String resizeObserverFix = "var _RO = window.ResizeObserver; if(_RO) { window.ResizeObserver = class extends _RO { constructor(callback) { super((entries, observer) => { window.requestAnimationFrame(() => { callback(entries, observer); }); }); } }; }";
                         view.evaluateJavascript(resizeObserverFix, null);
@@ -361,7 +355,6 @@ public class EmbeddedWebView extends CordovaPlugin {
 
                     @Override
                     public void onPageFinished(WebView view, String url) {
-                        // Ensure it finishes filling up
                         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
                             progressBar.setProgress(100, true);
                         } else {
@@ -372,6 +365,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                         updateNavigationState(id);
                         fireEvent(id, "loadStop", url);
                     }
+
                     @Override
                     public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
                         try {
@@ -384,9 +378,11 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
                 });
 
-                 @Override
+                // --- WEBCHROME CLIENT (Fixed) ---
+                webView.setWebChromeClient(new WebChromeClient() {
+                    @Override
                     public void onProgressChanged(WebView view, int newProgress) { 
-                        // 1. Update the progress value (Keep your existing animation logic)
+                        // 1. Update the progress value
                         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
                             boolean animate = newProgress > progressBar.getProgress();
                             progressBar.setProgress(newProgress, animate);
@@ -394,8 +390,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                             progressBar.setProgress(newProgress);
                         }
 
-                        // 2. THE FIX: Control visibility here. 
-                        // cached back-navigations often skip onPageFinished, but they usually hit progress 100.
+                        // 2. Control visibility here for cached back-navigations
                         if (newProgress == 100) {
                             progressBar.setVisibility(View.GONE);
                         } else {
@@ -430,7 +425,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                 instance.container = container;
                 instance.progressBar = progressBar;
                 instance.blockedUrls = blockedUrls; 
-                instance.historySkipUrls = historySkipUrls; // Save the skip list
+                instance.historySkipUrls = historySkipUrls;
                 instances.put(id, instance);
                 lastCreatedId = id;
 
@@ -583,14 +578,12 @@ public class EmbeddedWebView extends CordovaPlugin {
 
             instance.webView.stopLoading();
 
-            // 1. Check if we need to skip pages
             if (instance.historySkipUrls != null && !instance.historySkipUrls.isEmpty()) {
                 android.webkit.WebBackForwardList history = instance.webView.copyBackForwardList();
                 int currIndex = history.getCurrentIndex();
                 int stepsToGoBack = 0;
                 boolean foundSafePage = false;
 
-                // Look backwards
                 for (int i = currIndex - 1; i >= 0; i--) {
                     String url = history.getItemAtIndex(i).getUrl();
                     boolean isSkipped = false;
@@ -602,7 +595,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
 
                     if (!isSkipped) {
-                        stepsToGoBack = i - currIndex; // This will be negative (e.g. -2)
+                        stepsToGoBack = i - currIndex;
                         foundSafePage = true;
                         break;
                     }
@@ -618,7 +611,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                 }
             }
 
-            // 2. Fallback to normal
             if (instance.webView.canGoBack()) {
                 instance.webView.goBack();
                 instance.webView.postDelayed(() -> updateNavigationState(id), 100);
@@ -641,16 +633,13 @@ public class EmbeddedWebView extends CordovaPlugin {
     private boolean isEffectiveGoBackAvailable(WebViewInstance instance) {
         if (instance == null || instance.webView == null) return false;
         
-        // Basic check
         if (!instance.webView.canGoBack()) return false;
         
-        // If no skip list, basic check is enough
         if (instance.historySkipUrls == null || instance.historySkipUrls.isEmpty()) return true;
         
         android.webkit.WebBackForwardList history = instance.webView.copyBackForwardList();
         int currIndex = history.getCurrentIndex();
         
-        // Loop backward to see if there is ANY page that isn't skipped
         for (int i = currIndex - 1; i >= 0; i--) {
             String url = history.getItemAtIndex(i).getUrl();
             boolean isSkipped = false;
@@ -660,7 +649,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                     break;
                 }
             }
-            // Found a valid page!
             if (!isSkipped) return true;
         }
         
@@ -671,7 +659,6 @@ public class EmbeddedWebView extends CordovaPlugin {
         cordova.getActivity().runOnUiThread(() -> {
             WebViewInstance instance = getInstance(id, callbackContext);
             if (instance != null) { 
-                // Use the smart check
                 boolean effective = isEffectiveGoBackAvailable(instance);
                 if (callbackContext != null) callbackContext.success(effective ? 1 : 0); 
             }
@@ -690,15 +677,12 @@ public class EmbeddedWebView extends CordovaPlugin {
             WebViewInstance instance = instances.get(id);
             if (instance == null || instance.webView == null) return;
             
-            // 1. Calculate Status
             boolean newCanGoBack = isEffectiveGoBackAvailable(instance);
             boolean newCanGoForward = instance.webView.canGoForward();
             
-            // 2. Get Current URL
             String currentUrl = instance.webView.getUrl();
             if (currentUrl == null) currentUrl = "";
 
-            // 3. Fire canGoBackChanged (Updated to include URL JSON)
             if (newCanGoBack != instance.canGoBack) { 
                 instance.canGoBack = newCanGoBack; 
                 try {
@@ -709,7 +693,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                 } catch (JSONException ignored) {}
             }
 
-            // 4. Fire canGoForwardChanged (Updated to include URL JSON)
             if (newCanGoForward != instance.canGoForward) { 
                 instance.canGoForward = newCanGoForward; 
                 try {
@@ -720,7 +703,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                 } catch (JSONException ignored) {}
             }
             
-            // 5. Fire generic navigationStateChanged
             try {
                 JSONObject nav = new JSONObject();
                 nav.put("canGoBack", instance.canGoBack);
