@@ -50,11 +50,6 @@
     static WKProcessPool *_sharedPool = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        // Try to get the pool from the CDVViewController's existing engine if possible
-        // Otherwise, fall back to creating a new one.
-        // NOTE: The most reliable fix without private APIs is to ensure your server
-        // sends "Remember Me" (Persistent) cookies.
-        
         _sharedPool = [[WKProcessPool alloc] init];
     });
     return _sharedPool;
@@ -93,6 +88,18 @@
         }
     }
     return nil;
+}
+
+// --- HELPER: CHECK IF URL IS BLOCKED ---
+- (BOOL)isUrlBlocked:(NSString *)url forInstance:(EmbeddedWebViewInstance *)instance {
+    if (instance.blockedUrls && instance.blockedUrls.count > 0) {
+        for (NSString *blocked in instance.blockedUrls) {
+            if ([url containsString:blocked]) {
+                return YES;
+            }
+        }
+    }
+    return NO;
 }
 
 #pragma mark - Create
@@ -141,6 +148,10 @@
     [self.commandDelegate runInBackground:^{
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
+                
+                // --- OPTIMIZATION: Check block list BEFORE creating view logic if possible, 
+                // but we need the instance first. We check before the final loadRequest. ---
+
                 // --- 1. LAYOUT & WINDOW FINDER ---
                 NSNumber *topOffset = options[@"top"] ?: @0;
                 NSNumber *bottomOffset = options[@"bottom"] ?: @0;
@@ -176,7 +187,7 @@
                 config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
                 config.allowsInlineMediaPlayback = YES;
 
-                // --- 3. JS INJECTIONS (ResizeObserver & Logging) ---
+                // --- 3. JS INJECTIONS ---
                 NSString *resizeObserverFix = 
                     @"var _RO = window.ResizeObserver;"
                     @"if(_RO) { window.ResizeObserver = class extends _RO { constructor(callback) { super((entries, observer) => { window.requestAnimationFrame(() => { callback(entries, observer); }); }); } }; }";
@@ -186,7 +197,7 @@
                 [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:debugScript injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
                 [config.userContentController addScriptMessageHandler:self name:@"consoleHandler"];
                 
-                // --- 4. COOKIE PREP (JS Layer) ---
+                // --- 4. COOKIE PREP ---
                 NSURL *pageURL = [NSURL URLWithString:url];
                 NSString *rawHost = pageURL.host;
                 NSString *cookieDomain = nil;
@@ -205,7 +216,7 @@
                     NSMutableString *cookieJs = [NSMutableString string];
                     for (NSString *name in instance.cookies) {
                         NSString *val = [[instance.cookies[name] description] stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
-                        [cookieJs appendFormat:@"document.cookie='%@=%@; path=/';", name, val]; // Fallback to basic path to ensure it hits
+                        [cookieJs appendFormat:@"document.cookie='%@=%@; path=/';", name, val];
                     }
                     [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:cookieJs injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
                 }
@@ -252,7 +263,6 @@
                 webView.translatesAutoresizingMaskIntoConstraints = NO;
                 progressBar.translatesAutoresizingMaskIntoConstraints = NO;
                 
-                // Double thickness (10.0)
                 CGFloat ph = [options[@"progressHeight"] floatValue] ?: 10.0;
 
                 [NSLayoutConstraint activateConstraints:@[
@@ -273,7 +283,7 @@
                 self.instances[instanceId] = instance;
                 self.lastCreatedId = instanceId;
 
-                // --- 6. ROBUST COOKIE INJECTION (The "Verify Loop") ---
+                // --- 6. COOKIE INJECTION ---
                 WKHTTPCookieStore *cookieStore = config.websiteDataStore.httpCookieStore;
                 NSArray *cookieKeys = instance.cookies ? instance.cookies.allKeys : @[];
                 dispatch_group_t cookieGroup = dispatch_group_create();
@@ -285,68 +295,59 @@
                     props[NSHTTPCookieName] = name;
                     props[NSHTTPCookieValue] = value;
                     props[NSHTTPCookiePath] = @"/";
-                    props[NSHTTPCookieOriginURL] = url; // Critical for WKWebView
-                    
-                    // Force specific host if domain calculation seems risky, otherwise use wildcard
+                    props[NSHTTPCookieOriginURL] = url;
                     if (cookieDomain) props[NSHTTPCookieDomain] = cookieDomain;
-                    
                     props[NSHTTPCookieSecure] = @"TRUE";
-                    props[NSHTTPCookieExpires] = [NSDate dateWithTimeIntervalSinceNow:31536000]; // 1 Year persistence
+                    props[NSHTTPCookieExpires] = [NSDate dateWithTimeIntervalSinceNow:31536000]; 
                     if (@available(iOS 13.0, *)) { props[NSHTTPCookieSameSitePolicy] = NSHTTPCookieSameSiteLax; }
 
                     NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:props];
                     [cookieStore setCookie:cookie completionHandler:^{ dispatch_group_leave(cookieGroup); }];
                 }
 
-                // Prepare Request
                 NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
                 if (options[@"headers"]) {
                     for (NSString *key in options[@"headers"]) [request setValue:options[@"headers"][key] forHTTPHeaderField:key];
                 }
 
                 dispatch_group_notify(cookieGroup, dispatch_get_main_queue(), ^{
-                    // --------------------------------------------------------
-                    // FIX START: RECURSIVE VERIFICATION
-                    // Do NOT load until cookies exist in the store.
-                    // --------------------------------------------------------
-                    
                     __block int attempts = 0;
                     __block void (^checkAndLoad)(void) = nil;
                     
-                    // Define the checking block
                     checkAndLoad = ^{
                         [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> * _Nonnull cookies) {
                             BOOL foundRequiredCookies = NO;
-                            
-                            // If we didn't ask for cookies, or we found cookies in the jar
                             if (cookieKeys.count == 0 || cookies.count > 0) {
                                 foundRequiredCookies = YES;
                             }
                             
                             if (foundRequiredCookies || attempts >= 10) {
-                                // STOP: Load the URL
+                                
+                                // --- FIX: PRE-CHECK BLOCKED URL (Matches Android Logic) ---
+                                if ([self isUrlBlocked:url forInstance:instance]) {
+                                    NSLog(@"[EmbeddedWebView] Navigation blocked (Initial Load) for: %@", url);
+                                    [self fireEvent:@"loadBlocked" forInstanceId:instanceId withData:url];
+                                    [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:@"WebView created (navigation blocked)"] callbackId:command.callbackId];
+                                    checkAndLoad = nil;
+                                    return;
+                                }
+                                // -----------------------------------------------------------
+
                                 if (attempts >= 10) NSLog(@"[EmbeddedWebView] Warning: Cookie sync timed out, forcing load.");
                                 else NSLog(@"[EmbeddedWebView] Cookies verified. Loading URL.");
                                 
                                 [webView loadRequest:request];
                                 [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:@"WebView created"] callbackId:command.callbackId];
                                 
-                                // Break retain cycle
                                 checkAndLoad = nil; 
                             } else {
-                                // RETRY: Wait 100ms and check again
                                 attempts++;
                                 NSLog(@"[EmbeddedWebView] Waiting for cookie sync... (Attempt %d)", attempts);
                                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), checkAndLoad);
                             }
                         }];
                     };
-                    
-                    // Start the checking loop
                     checkAndLoad();
-                    // --------------------------------------------------------
-                    // FIX END
-                    // --------------------------------------------------------
                 });
 
             } @catch (NSException *exception) {
@@ -379,8 +380,6 @@
             @try { [instance.webView removeObserver:self forKeyPath:@"canGoForward"]; } @catch(NSException *e){}
             @try { [instance.webView removeObserver:self forKeyPath:@"loading"]; } @catch(NSException *e){}
 
-            
-            // Clean up message handler immediately
             @try { [instance.webView.configuration.userContentController removeScriptMessageHandlerForName:@"consoleHandler"]; } @catch(NSException *e){}
             
             [instance.webView stopLoading];
@@ -398,7 +397,7 @@
     });
 }
 
-// ... [destroyAllInstances, loadUrl, executeScript - UNCHANGED] ...
+// ... [destroyAllInstances - UNCHANGED] ...
 
 - (void)destroyAllInstances {
     NSArray<NSString *> *keys = [self.instances.allKeys copy];
@@ -408,6 +407,7 @@
     [self.instances removeAllObjects];
     self.lastCreatedId = nil;
 }
+
 - (void)loadUrl:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     NSString *url = [command argumentAtIndex:1];
@@ -416,6 +416,16 @@
     dispatch_async(dispatch_get_main_queue(), ^{
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
         if (!instance) return;
+        
+        // --- FIX: PRE-CHECK BLOCKED URL (Matches Android Logic) ---
+        if ([self isUrlBlocked:url forInstance:instance]) {
+            NSLog(@"[EmbeddedWebView] Navigation blocked (loadUrl) for: %@", url);
+            [self fireEvent:@"loadBlocked" forInstanceId:instanceId withData:url];
+            [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:@"Navigation blocked"] callbackId:command.callbackId];
+            return;
+        }
+        // ----------------------------------------------------------
+
         @try {
             NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
             if (headers) {
@@ -428,6 +438,9 @@
         }
     });
 }
+
+// ... [Rest of the file is standard, but keeping `decidePolicy` as safety net] ...
+
 - (void)executeScript:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     NSString *script = [command argumentAtIndex:1];
@@ -450,7 +463,6 @@
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
         if (instance && instance.container) {
             
-            // --- LAYOUT PRESERVATION (Fixes ResizeObserver Loop) ---
             if (visible) {
                 instance.container.hidden = NO;
                 instance.container.alpha = 1.0;
@@ -461,8 +473,6 @@
                 instance.container.userInteractionEnabled = NO;
                 [instance.container.superview sendSubviewToBack:instance.container];
                 
-                // --- HISTORY-SAFE VIDEO STOPPER ---
-                // Replaces the Youtube iframe with a clone. This pauses video without adding to History.
                 NSString *pauseScript =
                     @"(function(){"
                     @"  try {"
@@ -475,14 +485,11 @@
                     @"})();";
                 [instance.webView evaluateJavaScript:pauseScript completionHandler:nil];
             }
-            // -----------------------------------------------------
             
             [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
         }
     });
 }
-
-// ... [reload, goBack, etc - UNCHANGED] ...
 
 - (void)reload:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
@@ -507,7 +514,6 @@
 
             WKBackForwardList *historyList = instance.webView.backForwardList;
             
-            // If no skip list is defined, do standard behavior
             if (!instance.historySkipUrls || instance.historySkipUrls.count == 0) {
                 if ([instance.webView canGoBack]) {
                     [instance.webView goBack];
@@ -516,10 +522,7 @@
                 return;
             }
 
-            // --- SMART SKIP LOGIC ---
             WKBackForwardListItem *targetItem = nil;
-            
-            // Loop backwards starting from the item immediately behind current
             for (NSInteger i = historyList.backList.count - 1; i >= 0; i--) {
                 WKBackForwardListItem *item = historyList.backList[i];
                 NSString *urlStr = item.URL.absoluteString;
@@ -534,26 +537,22 @@
                 
                 if (!shouldSkip) {
                     targetItem = item;
-                    break; // Found the first safe page!
+                    break; 
                 }
             }
 
             if (targetItem) {
                 [instance.webView goToBackForwardListItem:targetItem];
             } else {
-                // If we skipped everything and found nothing, or list was empty
                 if ([instance.webView canGoBack]) {
                     [instance.webView goBack];
                 }
             }
-            // ------------------------
 
             [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
         }
     });
 }
-
-
 
 - (void)goForward:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
@@ -571,7 +570,6 @@
     dispatch_async(dispatch_get_main_queue(), ^{
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
         if (instance) {
-            // Use the smart check
             BOOL effectiveCanGoBack = [self isEffectiveGoBackAvailable:instance];
             [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsBool:effectiveCanGoBack] callbackId:command.callbackId];
         }
@@ -580,46 +578,27 @@
 
 - (BOOL)isEffectiveGoBackAvailable:(EmbeddedWebViewInstance *)instance {
     if (!instance || !instance.webView) return NO;
-    
-    // If native says no, it's definitely no
     if (![instance.webView canGoBack]) return NO;
-    
-    // If no skip list, trust native
     if (!instance.historySkipUrls || instance.historySkipUrls.count == 0) return YES;
     
-    // Check history stack
     WKBackForwardList *list = instance.webView.backForwardList;
-    
-    // Look for at least ONE page in the back history that isn't skipped
     for (WKBackForwardListItem *item in list.backList) {
         NSString *url = item.URL.absoluteString;
         BOOL isSkipped = NO;
-        
         for (NSString *skip in instance.historySkipUrls) {
             if ([url containsString:skip]) {
                 isSkipped = YES;
                 break;
             }
         }
-        
-        // If we found a page that is NOT skipped, Back is available
-        if (!isSkipped) {
-            return YES;
-        }
+        if (!isSkipped) return YES;
     }
-    
-    // If we looped through everything and it was all skipped URLs
     return NO;
 }
 
 - (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
     if ([message.name isEqualToString:@"consoleHandler"]) {
         NSDictionary *body = message.body;
-        
-        // -------------------------------------------------------------
-        // FIX: FINAL SAFETY NET - NATIVE LOG FILTER
-        // Absolutely refuses to send any ResizeObserver error to Cordova
-        // -------------------------------------------------------------
         NSString *msg = body[@"msg"] ?: @"";
         if ([msg rangeOfString:@"ResizeObserver" options:NSCaseInsensitiveSearch].location != NSNotFound) {
             return;
@@ -633,8 +612,6 @@
     }
 }
 
-// ... [delegates and helpers] ...
-
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     
     NSString *instanceId = [self instanceIdForWebView:webView];
@@ -644,6 +621,7 @@
 
     if (instanceId) {
         EmbeddedWebViewInstance *instance = self.instances[instanceId];
+        // SAFETY NET: This catches redirects and user clicks that bypass the create/loadUrl checks
         if (instance.blockedUrls && instance.blockedUrls.count > 0) {
             for (NSString *blocked in instance.blockedUrls) {
                 if ([urlString containsString:blocked]) {
@@ -703,19 +681,9 @@
         NSString *instanceId = [self instanceIdForWebView:webView];
         EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
         if (instance) {
-            // --- FIX START: Prevent backward animation ---
-            // 1. Reset to 0 first (silently)
             [instance.progressBar setProgress:0.0 animated:NO];
-            
-            // 2. Start at 15% instantly (no animation).
-            // This ensures it appears at 15% immediately when shown,
-            // preventing any interpolation from a previous 100% state.
             [instance.progressBar setProgress:0.15 animated:NO];
-            
-            // 3. Make visible now that value is correct
             instance.progressBar.hidden = NO;
-            // --- FIX END ---
-            
             [self fireEvent:@"loadStart" forInstanceId:instanceId withData:webView.URL.absoluteString];
         }
     });
@@ -767,14 +735,12 @@
         EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
         if (instance && instance.progressBar) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                // Existing animation logic
                 if (webView.estimatedProgress < instance.progressBar.progress) {
                     [instance.progressBar setProgress:webView.estimatedProgress animated:NO];
                 } else {
                     [instance.progressBar setProgress:webView.estimatedProgress animated:YES];
                 }
                 
-                // --- FIX 1: If it hits 100% via KVO, hide it (redundancy for didFinishNavigation) ---
                 if (webView.estimatedProgress >= 1.0) {
                     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                         instance.progressBar.hidden = YES;
@@ -783,17 +749,15 @@
             });
         }
     } 
-    // --- FIX 2: The "Loading" Observer (Silver Bullet for Back Navigation) ---
     else if ([keyPath isEqualToString:@"loading"]) {
         WKWebView *webView = (WKWebView *)object;
         NSString *instanceId = [self instanceIdForWebView:webView];
         EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
         
-        // If loading just flipped to false, force hide the bar immediately.
         if (instance && !webView.loading) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 instance.progressBar.hidden = YES;
-                [instance.progressBar setProgress:0.0 animated:NO]; // Reset for next time
+                [instance.progressBar setProgress:0.0 animated:NO]; 
             });
         }
     }
@@ -815,46 +779,25 @@
     EmbeddedWebViewInstance *instance = self.instances[instanceId];
     if (!instance || !instance.webView) return;
     
-    // 1. Calculate Status
     BOOL newCanGoBack = [self isEffectiveGoBackAvailable:instance];
     BOOL newCanGoForward = [instance.webView canGoForward];
-    
-    // 2. Get Current URL
     NSString *currentUrl = instance.webView.URL.absoluteString ?: @"";
     
-    // 3. Fire canGoBackChanged (if changed)
     if (newCanGoBack != instance.canGoBack) {
         instance.canGoBack = newCanGoBack;
-        
-        // Construct JSON Payload: { "value": true/false, "url": "https://..." }
-        NSDictionary *eventData = @{
-            @"value": @(instance.canGoBack),
-            @"url": currentUrl
-        };
+        NSDictionary *eventData = @{ @"value": @(instance.canGoBack), @"url": currentUrl };
         NSString *jsonData = [self jsonStringFromDictionary:eventData];
-        
         [self fireEvent:@"canGoBackChanged" forInstanceId:instanceId withData:jsonData];
     }
     
-    // 4. Fire canGoForwardChanged (if changed)
     if (newCanGoForward != instance.canGoForward) {
         instance.canGoForward = newCanGoForward;
-        
-        NSDictionary *eventData = @{
-            @"value": @(instance.canGoForward),
-            @"url": currentUrl
-        };
+        NSDictionary *eventData = @{ @"value": @(instance.canGoForward), @"url": currentUrl };
         NSString *jsonData = [self jsonStringFromDictionary:eventData];
-        
         [self fireEvent:@"canGoForwardChanged" forInstanceId:instanceId withData:jsonData];
     }
     
-    // 5. Fire generic navigationStateChanged (Always fires logic, usually redundant)
-    NSDictionary *navDict = @{
-        @"canGoBack": @(instance.canGoBack),
-        @"canGoForward": @(instance.canGoForward),
-        @"url": currentUrl
-    };
+    NSDictionary *navDict = @{ @"canGoBack": @(instance.canGoBack), @"canGoForward": @(instance.canGoForward), @"url": currentUrl };
     NSString *navState = [self jsonStringFromDictionary:navDict];
     [self fireEvent:@"navigationStateChanged" forInstanceId:instanceId withData:navState];
 }

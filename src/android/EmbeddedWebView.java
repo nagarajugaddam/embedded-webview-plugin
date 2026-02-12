@@ -143,6 +143,18 @@ public class EmbeddedWebView extends CordovaPlugin {
         return instance;
     }
 
+    // --- HELPER: CHECK IF URL IS BLOCKED ---
+    private boolean isUrlBlocked(String url, List<String> blockedUrls) {
+        if (blockedUrls != null && !blockedUrls.isEmpty()) {
+            for (String blocked : blockedUrls) {
+                if (url.contains(blocked)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private void create(
             final String id,
             final String url,
@@ -276,7 +288,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                     progressBar.getProgressDrawable().setColorFilter(Color.parseColor(progressColor), PorterDuff.Mode.SRC_IN);
                 } catch (Exception ignored) {}
 
-                // Default thickness 10
                 int progressHeightDp = options.optInt("progressHeight", 10);
                 int progressHeightPx = (int) (progressHeightDp * density);
 
@@ -290,15 +301,13 @@ public class EmbeddedWebView extends CordovaPlugin {
 
                 // --- WEBVIEW CLIENT ---
                 webView.setWebViewClient(new WebViewClient() {
+                    
+                    // Logic for Link Clicks / JS Redirects
                     private boolean checkBlocked(String url) {
-                        if (blockedUrls != null && !blockedUrls.isEmpty()) {
-                            for (String blocked : blockedUrls) {
-                                if (url.contains(blocked)) {
-                                    Log.d(TAG, "Navigation blocked for: " + url);
-                                    fireEvent(id, "loadBlocked", url);
-                                    return true;
-                                }
-                            }
+                        if (isUrlBlocked(url, blockedUrls)) {
+                            Log.d(TAG, "Navigation blocked for: " + url);
+                            fireEvent(id, "loadBlocked", url);
+                            return true;
                         }
                         return false;
                     }
@@ -331,7 +340,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                     public void onPageStarted(WebView view, String url, Bitmap favicon) {
                         progressBar.setVisibility(View.VISIBLE);
                         
-                        // Prevent backward sliding animation
                         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
                             progressBar.setProgress(0, false);
                             progressBar.setProgress(15, false); 
@@ -378,11 +386,10 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
                 });
 
-                // --- WEBCHROME CLIENT (Fixed) ---
+                // --- WEBCHROME CLIENT ---
                 webView.setWebChromeClient(new WebChromeClient() {
                     @Override
                     public void onProgressChanged(WebView view, int newProgress) { 
-                        // 1. Update the progress value
                         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
                             boolean animate = newProgress > progressBar.getProgress();
                             progressBar.setProgress(newProgress, animate);
@@ -390,7 +397,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                             progressBar.setProgress(newProgress);
                         }
 
-                        // 2. Control visibility here for cached back-navigations
                         if (newProgress == 100) {
                             progressBar.setVisibility(View.GONE);
                         } else {
@@ -437,6 +443,16 @@ public class EmbeddedWebView extends CordovaPlugin {
                         boolean cookiesSynced = currentCookies != null && !currentCookies.isEmpty();
                         
                         if (!hasCookiesToSet || cookiesSynced || attempts >= 10) {
+                            
+                            // --- FIX 1: CHECK BLOCKED URL BEFORE INITIAL LOAD ---
+                            if (isUrlBlocked(url, blockedUrls)) {
+                                Log.d(TAG, "Navigation blocked (Initial Load) for: " + url);
+                                fireEvent(id, "loadBlocked", url);
+                                callbackContext.success("WebView created (navigation blocked)");
+                                return; // Stop here, do not loadUrl
+                            }
+                            // ---------------------------------------------------
+
                             if (attempts >= 10) Log.w(TAG, "Cookie sync timed out on Android, forcing load.");
                             else Log.d(TAG, "Cookies verified on Android. Loading URL.");
                             
@@ -518,10 +534,21 @@ public class EmbeddedWebView extends CordovaPlugin {
             }
         });
     }
+
     private void loadUrl(final String id, final String url, final JSONObject headers, final CallbackContext callbackContext) {
         cordova.getActivity().runOnUiThread(() -> {
             WebViewInstance instance = getInstance(id, callbackContext);
             if (instance == null) return;
+            
+            // --- FIX 2: CHECK BLOCKED URL BEFORE PROGRAMMATIC LOAD ---
+            if (isUrlBlocked(url, instance.blockedUrls)) {
+                 Log.d(TAG, "Navigation blocked (loadUrl) for: " + url);
+                 fireEvent(id, "loadBlocked", url);
+                 if (callbackContext != null) callbackContext.success("Navigation blocked");
+                 return;
+            }
+            // ---------------------------------------------------------
+
             try {
                 if (headers != null && headers.length() > 0) instance.webView.loadUrl(url, jsonToMap(headers));
                 else instance.webView.loadUrl(url);
@@ -529,6 +556,7 @@ public class EmbeddedWebView extends CordovaPlugin {
             } catch (Exception e) { if (callbackContext != null) callbackContext.error(e.getMessage()); }
         });
     }
+
     private void executeScript(final String id, final String script, final CallbackContext callbackContext) {
         cordova.getActivity().runOnUiThread(() -> {
             WebViewInstance instance = getInstance(id, callbackContext);
