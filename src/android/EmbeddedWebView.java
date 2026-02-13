@@ -740,25 +740,35 @@ public class EmbeddedWebView extends CordovaPlugin {
         });
     }
     
-    // --- UPDATED FIRE EVENT METHOD ---
+   // --- UPDATED FIRE EVENT METHOD ---
     private void fireEvent(String id, String eventName, String data) {
         try {
             String payload;
-            if (data != null && data.trim().startsWith("{")) { payload = data; } 
-            else if (data == null) { payload = "null"; } 
-            else { payload = "\"" + data.replace("\"", "\\\"") + "\""; }
+            // Determine if data is a JSON object string or a plain string
+            if (data != null && data.trim().startsWith("{")) { 
+                payload = data; 
+            } else if (data == null) { 
+                payload = "null"; 
+            } else { 
+                // Escape quotes for plain strings (like URLs)
+                payload = "\"" + data.replace("\"", "\\\"") + "\""; 
+            }
             
             String fullEventName = "embeddedwebview." + id + "." + eventName;
-            String js = "cordova.fireDocumentEvent('" + fullEventName + "', {detail: " + payload + "});";
             
-            // Log for debugging
+            // FIX: Use standard CustomEvent instead of cordova.fireDocumentEvent
+            // This ensures document.addEventListener catches it reliably
+            String js = "var evt = new CustomEvent('" + fullEventName + "', { detail: " + payload + ", bubbles: true, cancelable: true }); document.dispatchEvent(evt);";
+            
             Log.d(TAG, "Firing Event: " + fullEventName);
 
             cordova.getActivity().runOnUiThread(() -> { 
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
-                    cordovaWebView.getEngine().evaluateJavascript(js, null);
-                } else {
-                    cordovaWebView.loadUrl("javascript:" + js);
+                if (cordovaWebView != null && cordovaWebView.getEngine() != null) {
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
+                        cordovaWebView.getEngine().evaluateJavascript(js, null);
+                    } else {
+                        cordovaWebView.loadUrl("javascript:" + js);
+                    }
                 }
             });
         } catch (Exception e) {
