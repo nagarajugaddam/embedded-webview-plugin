@@ -302,10 +302,9 @@ public class EmbeddedWebView extends CordovaPlugin {
                 // --- WEBVIEW CLIENT ---
                 webView.setWebViewClient(new WebViewClient() {
                     
-                    // Logic for Link Clicks / JS Redirects
                     private boolean checkBlocked(String url) {
                         if (isUrlBlocked(url, blockedUrls)) {
-                            Log.d(TAG, "Navigation blocked for: " + url);
+                            Log.d(TAG, "Navigation blocked (WebViewClient) for: " + url);
                             fireEvent(id, "loadBlocked", url);
                             return true;
                         }
@@ -449,7 +448,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                                 Log.d(TAG, "Navigation blocked (Initial Load) for: " + url);
                                 fireEvent(id, "loadBlocked", url);
                                 callbackContext.success("WebView created (navigation blocked)");
-                                return; // Stop here, do not loadUrl
+                                return; // Stop here
                             }
                             // ---------------------------------------------------
 
@@ -741,17 +740,32 @@ public class EmbeddedWebView extends CordovaPlugin {
         });
     }
     
+    // --- UPDATED FIRE EVENT METHOD ---
     private void fireEvent(String id, String eventName, String data) {
         try {
             String payload;
             if (data != null && data.trim().startsWith("{")) { payload = data; } 
             else if (data == null) { payload = "null"; } 
             else { payload = "\"" + data.replace("\"", "\\\"") + "\""; }
+            
             String fullEventName = "embeddedwebview." + id + "." + eventName;
-            String js = "javascript:cordova.fireDocumentEvent('" + fullEventName + "', {detail: " + payload + "});";
-            cordova.getActivity().runOnUiThread(() -> { cordovaWebView.getView().post(() -> { try { cordovaWebView.loadUrl(js); } catch (Exception e) {} }); });
-        } catch (Exception e) {}
+            String js = "cordova.fireDocumentEvent('" + fullEventName + "', {detail: " + payload + "});";
+            
+            // Log for debugging
+            Log.d(TAG, "Firing Event: " + fullEventName);
+
+            cordova.getActivity().runOnUiThread(() -> { 
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
+                    cordovaWebView.getEngine().evaluateJavascript(js, null);
+                } else {
+                    cordovaWebView.loadUrl("javascript:" + js);
+                }
+            });
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to fire event", e);
+        }
     }
+    
     @Override public void onDestroy() { for (String id : new HashMap<>(instances).keySet()) destroy(id, null); instances.clear(); super.onDestroy(); }
     @Override public void onReset() { for (String id : new HashMap<>(instances).keySet()) destroy(id, null); instances.clear(); super.onReset(); }
 }
