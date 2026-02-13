@@ -740,29 +740,35 @@ public class EmbeddedWebView extends CordovaPlugin {
         });
     }
     
-   // --- UPDATED FIRE EVENT METHOD ---
+  // --- UPDATED FIRE EVENT METHOD (ROBUST) ---
     private void fireEvent(String id, String eventName, String data) {
-        try {
-            String payload;
-            // Determine if data is a JSON object string or a plain string
-            if (data != null && data.trim().startsWith("{")) { 
-                payload = data; 
-            } else if (data == null) { 
-                payload = "null"; 
-            } else { 
-                // Escape quotes for plain strings (like URLs)
-                payload = "\"" + data.replace("\"", "\\\"") + "\""; 
-            }
-            
-            String fullEventName = "embeddedwebview." + id + "." + eventName;
-            
-            // FIX: Use standard CustomEvent instead of cordova.fireDocumentEvent
-            // This ensures document.addEventListener catches it reliably
-            String js = "var evt = new CustomEvent('" + fullEventName + "', { detail: " + payload + ", bubbles: true, cancelable: true }); document.dispatchEvent(evt);";
-            
-            Log.d(TAG, "Firing Event: " + fullEventName);
+        final String fullEventName = "embeddedwebview." + id + "." + eventName;
+        
+        String payload;
+        // Determine if data is a JSON object string or a plain string
+        if (data != null && data.trim().startsWith("{")) {
+            payload = data; 
+        } else if (data == null) {
+            payload = "null";
+        } else {
+            // Escape quotes for plain strings (like URLs)
+            payload = "\"" + data.replace("\"", "\\\"") + "\"";
+        }
 
-            cordova.getActivity().runOnUiThread(() -> { 
+        // Construct JS:
+        // 1. Log to console (so you can see it in Chrome Inspect)
+        // 2. Wrap in setTimeout to solve Android Race Conditions
+        // 3. Dispatch standard CustomEvent
+        final String js = "setTimeout(function(){ " +
+                "console.log('[EmbeddedWebView] Dispatching: " + fullEventName + "', " + payload + "); " +
+                "var evt = new CustomEvent('" + fullEventName + "', { detail: " + payload + ", bubbles: true, cancelable: true }); " +
+                "document.dispatchEvent(evt); " +
+                "}, 0);";
+        
+        Log.d(TAG, "Preparing to fire event: " + fullEventName);
+
+        cordova.getActivity().runOnUiThread(() -> {
+            try {
                 if (cordovaWebView != null && cordovaWebView.getEngine() != null) {
                     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
                         cordovaWebView.getEngine().evaluateJavascript(js, null);
@@ -770,10 +776,10 @@ public class EmbeddedWebView extends CordovaPlugin {
                         cordovaWebView.loadUrl("javascript:" + js);
                     }
                 }
-            });
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to fire event", e);
-        }
+            } catch (Exception e) {
+                Log.e(TAG, "Error firing event", e);
+            }
+        });
     }
     
     @Override public void onDestroy() { for (String id : new HashMap<>(instances).keySet()) destroy(id, null); instances.clear(); super.onDestroy(); }
