@@ -364,13 +364,19 @@
 }
 
 - (void)destroyInstanceWithId:(NSString *)instanceId sendCallback:(BOOL)sendCallback callbackId:(NSString *)callbackId {
+    // We must capture the specific instance logic inside the main queue
     dispatch_async(dispatch_get_main_queue(), ^{
         EmbeddedWebViewInstance *instance = self.instances[instanceId];
+        
+        // If the instance is gone, we can't clean up the UI, but we can still send the callback
         if (!instance) {
-             if (sendCallback) [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:callbackId];
+             if (sendCallback && callbackId) {
+                 [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:callbackId];
+             }
              return;
         }
         
+        // 1. Cleanup WebView
         if (instance.webView) {
             instance.webView.navigationDelegate = nil;
             instance.webView.UIDelegate = nil;
@@ -383,15 +389,18 @@
             @try { [instance.webView.configuration.userContentController removeScriptMessageHandlerForName:@"consoleHandler"]; } @catch(NSException *e){}
             
             [instance.webView stopLoading];
-            [instance.webView removeFromSuperview];
+            [instance.webView removeFromSuperview]; // <--- Critical: Removes from screen
             instance.webView = nil;
         }
         
+        // 2. Cleanup Container & Progress
         [instance.progressBar removeFromSuperview];
         [instance.container removeFromSuperview];
+        
+        // 3. Remove from Dictionary (Perform this LAST inside the block)
         [self.instances removeObjectForKey:instanceId];
         
-        if (sendCallback) {
+        if (sendCallback && callbackId) {
             [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:@"Destroyed"] callbackId:callbackId];
         }
     });
@@ -400,11 +409,17 @@
 // ... [destroyAllInstances - UNCHANGED] ...
 
 - (void)destroyAllInstances {
+    // Create a copy of keys to iterate safely
     NSArray<NSString *> *keys = [self.instances.allKeys copy];
+    
     for (NSString *instanceId in keys) {
+        // This method already handles removal from self.instances inside its async block
         [self destroyInstanceWithId:instanceId sendCallback:NO callbackId:nil];
     }
-    [self.instances removeAllObjects];
+    
+    // Do NOT call [self.instances removeAllObjects] here.
+    // Doing so deletes the objects before the async UI thread can retrieve them to remove the Views.
+    
     self.lastCreatedId = nil;
 }
 
