@@ -120,18 +120,6 @@ public class EmbeddedWebView extends CordovaPlugin {
         return false;
     }
 
-    public boolean onBackPressed() {
-        if (lastCreatedId == null) {
-            return false;
-        }
-        WebViewInstance instance = instances.get(lastCreatedId);
-        if (instance != null && instance.webView != null && isEffectiveGoBackAvailable(instance)) {
-            this.goBack(lastCreatedId, null);
-            return true;
-        }
-        return false;
-    }
-
     private WebViewInstance getInstance(String id, CallbackContext callbackContext) {
         WebViewInstance instance = instances.get(id);
         if (instance == null || instance.webView == null) {
@@ -161,7 +149,6 @@ public class EmbeddedWebView extends CordovaPlugin {
             final JSONObject options,
             final CallbackContext callbackContext
     ) {
-
         Log.d(TAG, "Creating WebView (id=" + id + ")");
 
         if (instances.containsKey(id)) {
@@ -213,7 +200,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                 webView.setBackgroundColor(Color.TRANSPARENT);
                 webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
 
-                // --- 1. PARSE BLOCKED URLS ---
+                // 1. PARSE BLOCKED URLS
                 final List<String> blockedUrls = new ArrayList<>();
                 if (options.has("blockedUrls")) {
                     JSONArray blockedArr = options.getJSONArray("blockedUrls");
@@ -222,7 +209,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
                 }
 
-                // --- 2. PARSE SKIP URLS ---
+                // 2. PARSE SKIP URLS
                 final List<String> historySkipUrls = new ArrayList<>();
                 if (options.has("historySkipUrls")) {
                     JSONArray skipArr = options.getJSONArray("historySkipUrls");
@@ -231,7 +218,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                     }
                 }
 
-                // --- 3. COOKIE SETUP ---
+                // 3. COOKIE SETUP
                 String calculatedCookieDomain = null;
                 try {
                     URL uri = new URL(url);
@@ -443,26 +430,26 @@ public class EmbeddedWebView extends CordovaPlugin {
                         
                         if (!hasCookiesToSet || cookiesSynced || attempts >= 10) {
                             
-                            // --- FIX 1: CHECK BLOCKED URL BEFORE INITIAL LOAD ---
+                            // --- CRITICAL FIX: CHECK BLOCKED URL BEFORE INITIAL LOAD ---
                             if (isUrlBlocked(url, blockedUrls)) {
                                 Log.d(TAG, "Navigation blocked (Initial Load) for: " + url);
                                 
-                                // CRITICAL FIX: Increased delay to 800ms
+                                // 1. Fire Event (Backup) - Delayed to allow JS listeners to attach
                                 new Handler(Looper.getMainLooper()).postDelayed(() -> {
                                     fireEvent(id, "loadBlocked", url);
                                 }, 800); 
-                                
-                                // FAIL-SAFE: Return JSON object so JS callback can also handle it
+
+                                // 2. Return JSON status directly to callback (Primary Fix)
                                 try {
                                     JSONObject result = new JSONObject();
                                     result.put("status", "blocked");
                                     result.put("url", url);
-                                    result.put("message", "WebView created (navigation blocked)");
+                                    result.put("message", "Navigation blocked");
                                     callbackContext.success(result);
                                 } catch (JSONException e) {
                                     callbackContext.success("WebView created (navigation blocked)");
                                 }
-                                return; // Stop here
+                                return; // Stop here, do not load URL
                             }
                             // ---------------------------------------------------
 
@@ -759,20 +746,14 @@ public class EmbeddedWebView extends CordovaPlugin {
         final String fullEventName = "embeddedwebview." + id + "." + eventName;
         
         String payload;
-        // Check if data looks like a JSON object
         if (data != null && data.trim().startsWith("{")) {
             payload = data; 
         } else if (data == null) {
             payload = "null";
         } else {
-            // Escape quotes for plain strings
             payload = "\"" + data.replace("\"", "\\\"") + "\"";
         }
 
-        // JS to dispatch CustomEvent
-        // 1. Logs to JS console for debugging
-        // 2. Uses window.setTimeout to break call stack
-        // 3. Wraps in try-catch to prevent crashes
         final String js = "window.setTimeout(function(){ " +
                 "try { " +
                 "  console.log('[Native] Firing: " + fullEventName + "'); " +
@@ -781,7 +762,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                 "} catch(e) { console.error('Error firing native event', e); } " +
                 "}, 0);";
 
-        // Execute on UI Thread
         cordova.getActivity().runOnUiThread(() -> {
             try {
                 if (cordovaWebView != null && cordovaWebView.getEngine() != null) {
