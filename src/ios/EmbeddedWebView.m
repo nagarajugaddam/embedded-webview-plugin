@@ -221,9 +221,15 @@
                     [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:cookieJs injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
                 }
 
-                if ([options[@"enableZoom"] boolValue]) {
+                // --- 4a. VIEWPORT / ZOOM HANDLING (UPDATED) ---
+                BOOL enableZoom = [options[@"enableZoom"] boolValue];
+                if (enableZoom) {
                     NSString *viewport = @"var meta = document.createElement('meta'); meta.name = 'viewport'; meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes'; document.getElementsByTagName('head')[0].appendChild(meta);";
                     [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:viewport injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES]];
+                } else {
+                    // Inject strict viewport rules to prevent JS/CSS scaling
+                    NSString *noZoomScript = @"var meta = document.createElement('meta'); meta.name = 'viewport'; meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'; document.getElementsByTagName('head')[0].appendChild(meta);";
+                    [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:noZoomScript injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES]];
                 }
 
                 // --- 5. VIEW CREATION ---
@@ -235,6 +241,16 @@
                 webView.opaque = NO;
                 if (@available(iOS 16.4, *)) { @try { [webView setValue:@YES forKey:@"inspectable"]; } @catch (NSException *e) {} }
                 if (options[@"userAgent"]) webView.customUserAgent = options[@"userAgent"];
+                
+                // --- 5a. NATIVE ZOOM LOCK (UPDATED) ---
+                // Physically lock the scroll view to prevent pinch gestures
+                if (!enableZoom) {
+                    webView.scrollView.minimumZoomScale = 1.0;
+                    webView.scrollView.maximumZoomScale = 1.0;
+                    webView.scrollView.zoomScale = 1.0;
+                    webView.scrollView.bouncesZoom = NO;
+                    // Note: We do not set delegate=nil to avoid breaking other plugin features that might rely on scroll events
+                }
                 
                 if ([options[@"clearCache"] boolValue]) {
                     NSSet *types = [NSSet setWithArray:@[WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache]];
