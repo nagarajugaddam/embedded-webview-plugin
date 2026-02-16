@@ -11,7 +11,6 @@ import org.json.JSONObject;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.WebSettings;
-import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest; 
 import android.webkit.CookieManager;
@@ -32,6 +31,7 @@ import java.util.Map;
 import android.graphics.Bitmap;
 import android.view.Gravity;
 import android.os.Handler; 
+import android.os.Looper;
 
 import java.net.URL;
 import java.net.MalformedURLException;
@@ -171,7 +171,7 @@ public class EmbeddedWebView extends CordovaPlugin {
 
         cordova.getActivity().runOnUiThread(() -> {
             try {
-                // Layout
+                // Layout logic
                 float density = cordova.getActivity().getResources().getDisplayMetrics().density;
                 int topOffsetDp = options.optInt("top", 0);
                 int bottomOffsetDp = options.optInt("bottom", 0);
@@ -447,12 +447,21 @@ public class EmbeddedWebView extends CordovaPlugin {
                             if (isUrlBlocked(url, blockedUrls)) {
                                 Log.d(TAG, "Navigation blocked (Initial Load) for: " + url);
                                 
-                                // CRITICAL FIX: Delay the event so JS has time to attach the listener
-                                new Handler().postDelayed(() -> {
+                                // CRITICAL FIX: Increased delay to 800ms
+                                new Handler(Looper.getMainLooper()).postDelayed(() -> {
                                     fireEvent(id, "loadBlocked", url);
-                                }, 500); // Wait 500ms
+                                }, 800); 
                                 
-                                callbackContext.success("WebView created (navigation blocked)");
+                                // FAIL-SAFE: Return JSON object so JS callback can also handle it
+                                try {
+                                    JSONObject result = new JSONObject();
+                                    result.put("status", "blocked");
+                                    result.put("url", url);
+                                    result.put("message", "WebView created (navigation blocked)");
+                                    callbackContext.success(result);
+                                } catch (JSONException e) {
+                                    callbackContext.success("WebView created (navigation blocked)");
+                                }
                                 return; // Stop here
                             }
                             // ---------------------------------------------------
@@ -745,31 +754,50 @@ public class EmbeddedWebView extends CordovaPlugin {
         });
     }
     
- private void fireEvent(String id, String eventName, String data) {
-    final String fullEventName = "embeddedwebview." + id + "." + eventName;
-    String payload = (data != null && data.trim().startsWith("{")) ? data : "\"" + (data == null ? "null" : data.replace("\"", "\\\"")) + "\"";
+    // --- UPDATED FIRE EVENT METHOD (Final Robust Version) ---
+    private void fireEvent(String id, String eventName, String data) {
+        final String fullEventName = "embeddedwebview." + id + "." + eventName;
+        
+        String payload;
+        // Check if data looks like a JSON object
+        if (data != null && data.trim().startsWith("{")) {
+            payload = data; 
+        } else if (data == null) {
+            payload = "null";
+        } else {
+            // Escape quotes for plain strings
+            payload = "\"" + data.replace("\"", "\\\"") + "\"";
+        }
 
-    // 1. Log to console
-    // 2. Use CustomEvent with bubbling
-    // 3. Wrap in setTimeout(0) to free the JS thread
-    final String js = "setTimeout(function(){ " +
-            "console.log('[Native] Firing: " + fullEventName + "'); " +
-            "var evt = new CustomEvent('" + fullEventName + "', { detail: " + payload + ", bubbles: true, cancelable: true }); " +
-            "document.dispatchEvent(evt); " +
-            "}, 0);";
+        // JS to dispatch CustomEvent
+        // 1. Logs to JS console for debugging
+        // 2. Uses window.setTimeout to break call stack
+        // 3. Wraps in try-catch to prevent crashes
+        final String js = "window.setTimeout(function(){ " +
+                "try { " +
+                "  console.log('[Native] Firing: " + fullEventName + "'); " +
+                "  var evt = new CustomEvent('" + fullEventName + "', { detail: " + payload + ", bubbles: true, cancelable: true }); " +
+                "  document.dispatchEvent(evt); " +
+                "} catch(e) { console.error('Error firing native event', e); } " +
+                "}, 0);";
 
-    cordova.getActivity().runOnUiThread(() -> {
-        try {
-            if (cordovaWebView != null && cordovaWebView.getEngine() != null) {
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
-                    cordovaWebView.getEngine().evaluateJavascript(js, null);
+        // Execute on UI Thread
+        cordova.getActivity().runOnUiThread(() -> {
+            try {
+                if (cordovaWebView != null && cordovaWebView.getEngine() != null) {
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
+                        cordovaWebView.getEngine().evaluateJavascript(js, null);
+                    } else {
+                        cordovaWebView.loadUrl("javascript:" + js);
+                    }
                 } else {
-                    cordovaWebView.loadUrl("javascript:" + js);
+                    Log.e(TAG, "CordovaWebView is null, cannot fire event: " + fullEventName);
                 }
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to fire event: " + fullEventName, e);
             }
-        } catch (Exception ignored) {}
-    });
-}
+        });
+    }
     
     @Override public void onDestroy() { for (String id : new HashMap<>(instances).keySet()) destroy(id, null); instances.clear(); super.onDestroy(); }
     @Override public void onReset() { for (String id : new HashMap<>(instances).keySet()) destroy(id, null); instances.clear(); super.onReset(); }
