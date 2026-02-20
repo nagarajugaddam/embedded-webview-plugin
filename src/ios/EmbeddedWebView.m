@@ -679,19 +679,23 @@
 
     if (instanceId) {
         EmbeddedWebViewInstance *instance = self.instances[instanceId];
-        // SAFETY NET: This catches redirects and user clicks that bypass the create/loadUrl checks
-        if (instance.blockedUrls && instance.blockedUrls.count > 0) {
-            for (NSString *blocked in instance.blockedUrls) {
-                if ([urlString containsString:blocked]) {
-                    NSLog(@"[EmbeddedWebView] Navigation blocked for: %@", urlString);
-                    [self fireEvent:@"loadBlocked" forInstanceId:instanceId withData:urlString];
-                    decisionHandler(WKNavigationActionPolicyCancel);
-                    return;
+        
+        // FIX: Only check blocked URLs if the view is actually visible
+        if (instance && !instance.container.hidden) {
+            if (instance.blockedUrls && instance.blockedUrls.count > 0) {
+                for (NSString *blocked in instance.blockedUrls) {
+                    if ([urlString containsString:blocked]) {
+                        NSLog(@"[EmbeddedWebView] Navigation blocked for: %@", urlString);
+                        [self fireEvent:@"loadBlocked" forInstanceId:instanceId withData:urlString];
+                        decisionHandler(WKNavigationActionPolicyCancel);
+                        return;
+                    }
                 }
             }
         }
     }
 
+    // ... (Keep the rest of your standard scheme handling tel/mailto etc) ...
     if ([scheme isEqualToString:@"tel"] ||
         [scheme isEqualToString:@"mailto"] ||
         [scheme isEqualToString:@"sms"] ||
@@ -738,7 +742,9 @@
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *instanceId = [self instanceIdForWebView:webView];
         EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
-        if (instance) {
+        
+        // FIX: Do not fire events if instance is missing OR hidden
+        if (instance && !instance.container.hidden) {
             [instance.progressBar setProgress:0.0 animated:NO];
             [instance.progressBar setProgress:0.15 animated:NO];
             instance.progressBar.hidden = NO;
@@ -750,11 +756,17 @@
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *instanceId = [self instanceIdForWebView:webView];
         EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
+        
         if (instance) {
+            // UI updates (Progress bar) can still happen
             [instance.progressBar setProgress:1.0 animated:YES];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ instance.progressBar.hidden = YES; });
-            [self updateNavigationStateForInstanceId:instanceId];
-            [self fireEvent:@"loadStop" forInstanceId:instanceId withData:webView.URL.absoluteString];
+            
+            // FIX: Only fire JS events if visible
+            if (!instance.container.hidden) {
+                [self updateNavigationStateForInstanceId:instanceId];
+                [self fireEvent:@"loadStop" forInstanceId:instanceId withData:webView.URL.absoluteString];
+            }
         }
     });
 }
@@ -767,6 +779,13 @@
 - (void)handleLoadError:(NSError *)error webView:(WKWebView *)webView {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *instanceId = [self instanceIdForWebView:webView];
+        EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil; // Lookup instance to check visibility
+        
+        // FIX: Do not fire error events if hidden or destroyed
+        if (!instanceId || (instance && instance.container.hidden)) {
+            return;
+        }
+
         NSString *url = webView.URL.absoluteString ?: @"";
         
         NSDictionary *errDict = @{
@@ -776,7 +795,7 @@
         };
         NSString *errorData = [self jsonStringFromDictionary:errDict];
         
-        if (instanceId) [self fireEvent:@"loadError" forInstanceId:instanceId withData:errorData];
+        [self fireEvent:@"loadError" forInstanceId:instanceId withData:errorData];
     });
 }
 - (WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration forNavigationAction:(WKNavigationAction *)navigationAction windowFeatures:(WKWindowFeatures *)windowFeatures {
