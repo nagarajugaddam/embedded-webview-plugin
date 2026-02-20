@@ -186,7 +186,13 @@ public class EmbeddedWebView extends CordovaPlugin {
                 if (options.optBoolean("enableZoom", false)) {
                     settings.setBuiltInZoomControls(true);
                     settings.setDisplayZoomControls(false);
+                    settings.setSupportZoom(true);
+                } else {
+                    settings.setBuiltInZoomControls(false);
+                    settings.setDisplayZoomControls(false);
+                    settings.setSupportZoom(false); // Force native zoom disable
                 }
+                
                 if (options.optBoolean("clearCache", false)) {
                     webView.clearCache(true);
                 }
@@ -334,8 +340,14 @@ public class EmbeddedWebView extends CordovaPlugin {
                             progressBar.setProgress(15);
                         }
                         
-                        String resizeObserverFix = "var _RO = window.ResizeObserver; if(_RO) { window.ResizeObserver = class extends _RO { constructor(callback) { super((entries, observer) => { window.requestAnimationFrame(() => { callback(entries, observer); }); }); } }; }";
+                        // --- FIX: Updated ResizeObserver Logic with Error Suppression ---
+                        String resizeObserverFix = 
+                            "var _RO = window.ResizeObserver;" +
+                            "if(_RO) { window.ResizeObserver = class extends _RO { constructor(callback) { super((entries, observer) => { window.requestAnimationFrame(() => { callback(entries, observer); }); }); } }; }" +
+                            "window.addEventListener('error', function(e) { if (e.message && e.message.indexOf('ResizeObserver loop') !== -1) { e.stopImmediatePropagation(); e.preventDefault(); } });";
+                            
                         view.evaluateJavascript(resizeObserverFix, null);
+                        
                         injectCookies(view, options, cookieDomain);
                         fireEvent(id, "loadStart", url);
                         updateNavigationState(id); 

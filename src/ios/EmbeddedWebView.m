@@ -193,13 +193,40 @@
                     @"if(_RO) { window.ResizeObserver = class extends _RO { constructor(callback) { super((entries, observer) => { window.requestAnimationFrame(() => { callback(entries, observer); }); }); } }; }";
                 [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:resizeObserverFix injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
                 
-                NSString *debugScript = @"function shouldIgnore(msg) { return msg && msg.toString().toLowerCase().indexOf('resizeobserver') !== -1; } window.onerror = function(msg, url, line) { if (shouldIgnore(msg)) return true; window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-fatal', msg: msg, line: line, url: url}); }; var origLog = console.log; console.log = function() { var msg = Array.from(arguments).join(' '); if(shouldIgnore(msg)) return; origLog.apply(console, arguments); window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-log', msg: msg}); };";
-                [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:debugScript injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
-                [config.userContentController addScriptMessageHandler:self name:@"consoleHandler"];
-                
-                // --- 4. COOKIE PREP ---
-                NSURL *pageURL = [NSURL URLWithString:url];
-                NSString *rawHost = pageURL.host;
+            // --- IMPROVED ERROR SUPPRESSION ---
+            NSString *debugScript =
+                @"function shouldIgnore(msg) { "
+                @"  if (!msg) return false; "
+                @"  var s = msg.toString().toLowerCase(); "
+                @"  return s.indexOf('resizeobserver') !== -1 || s.indexOf('script error') !== -1; "
+                @"} "
+                // 1. Catch the Event immediately to stop propagation
+                @"window.addEventListener('error', function(e) { "
+                @"  if (shouldIgnore(e.message)) { "
+                @"    e.stopImmediatePropagation(); "
+                @"    e.preventDefault(); "
+                @"  } "
+                @"}); "
+                // 2. Catch window.onerror for standard logging
+                @"window.onerror = function(msg, url, line) { "
+                @"  if (shouldIgnore(msg)) return true; " // returning true prevents default browser error
+                @"  window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-fatal', msg: msg, line: line, url: url}); "
+                @"}; "
+                // 3. Filter Console Logs
+                @"var origLog = console.log; "
+                @"console.log = function() { "
+                @"  var msg = Array.from(arguments).join(' '); "
+                @"  if(shouldIgnore(msg)) return; "
+                @"  origLog.apply(console, arguments); "
+                @"  window.webkit.messageHandlers.consoleHandler.postMessage({type: 'js-log', msg: msg}); "
+                @"};";
+
+            [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:debugScript injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
+            [config.userContentController addScriptMessageHandler:self name:@"consoleHandler"];
+
+            // --- 4. COOKIE PREP ---
+            NSURL *pageURL = [NSURL URLWithString:url];
+            NSString *rawHost = pageURL.host;
                 NSString *cookieDomain = nil;
                 
                 if (rawHost && ![rawHost isEqualToString:@"localhost"]) {
