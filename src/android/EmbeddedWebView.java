@@ -472,6 +472,9 @@ public class EmbeddedWebView extends CordovaPlugin {
                 instance.historySkipUrls = historySkipUrls;
                 instances.put(id, instance);
                 lastCreatedId = id;
+                Log.d(TAG, "✅ WebView instance created and stored with id: " + id);
+                Log.d(TAG, "   Total instances now: " + instances.size());
+                Log.d(TAG, "   All registered IDs: " + instances.keySet().toString());
 
                 Runnable loadTask = new Runnable() {
                     int attempts = 0;
@@ -754,8 +757,12 @@ public class EmbeddedWebView extends CordovaPlugin {
 
     private void updateNavigationState(final String id) {
         cordova.getActivity().runOnUiThread(() -> {
+            Log.d(TAG, "updateNavigationState called for id: " + id);
             WebViewInstance instance = instances.get(id);
-            if (instance == null || instance.webView == null) return;
+            if (instance == null || instance.webView == null) {
+                Log.e(TAG, "❌ updateNavigationState: instance not found for id: " + id);
+                return;
+            }
             
             boolean newCanGoBack = isEffectiveGoBackAvailable(instance);
             boolean newCanGoForward = instance.webView.canGoForward();
@@ -769,6 +776,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                     JSONObject data = new JSONObject();
                     data.put("value", instance.canGoBack);
                     data.put("url", currentUrl);
+                    Log.d(TAG, "Firing canGoBackChanged event for id: " + id + ", value: " + newCanGoBack);
                     fireEvent(id, "canGoBackChanged", data.toString()); 
                 } catch (JSONException ignored) {}
             }
@@ -779,6 +787,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                     JSONObject data = new JSONObject();
                     data.put("value", instance.canGoForward);
                     data.put("url", currentUrl);
+                    Log.d(TAG, "Firing canGoForwardChanged event for id: " + id + ", value: " + newCanGoForward);
                     fireEvent(id, "canGoForwardChanged", data.toString()); 
                 } catch (JSONException ignored) {}
             }
@@ -796,6 +805,7 @@ public class EmbeddedWebView extends CordovaPlugin {
     // --- UPDATED FIRE EVENT METHOD (Final Robust Version) ---
     private void fireEvent(String id, String eventName, String data) {
         final String fullEventName = "embeddedwebview." + id + "." + eventName;
+        Log.d(TAG, "fireEvent CALLED: id=" + id + ", eventName=" + eventName + ", data=" + data);
         
         String payload;
         if (data != null && data.trim().startsWith("{")) {
@@ -817,6 +827,9 @@ public class EmbeddedWebView extends CordovaPlugin {
         cordova.getActivity().runOnUiThread(() -> {
             // Fire event in the EMBEDDED WebView instance (not the main CordovaWebView)
             WebViewInstance instance = instances.get(id);
+            Log.d(TAG, "Looking for WebView instance with id: " + id);
+            Log.d(TAG, "Available instances: " + instances.keySet().toString());
+            
             if (instance != null && instance.webView != null) {
                 try {
                     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
@@ -824,12 +837,17 @@ public class EmbeddedWebView extends CordovaPlugin {
                     } else {
                         instance.webView.loadUrl("javascript:" + js);
                     }
-                    Log.d(TAG, "Event fired in embedded WebView: " + fullEventName);
+                    Log.d(TAG, "✅ Event fired successfully in embedded WebView: " + fullEventName);
                 } catch (Exception e) {
-                    Log.e(TAG, "Failed to fire event in embedded WebView: " + fullEventName, e);
+                    Log.e(TAG, "❌ Failed to fire event in embedded WebView: " + fullEventName, e);
                 }
             } else {
-                Log.e(TAG, "WebView instance not found for id: " + id + ", cannot fire event: " + fullEventName);
+                Log.e(TAG, "❌ WebView instance not found for id: " + id + ", cannot fire event: " + fullEventName);
+                if (instance == null) {
+                    Log.e(TAG, "   Reason: instance is NULL");
+                } else if (instance.webView == null) {
+                    Log.e(TAG, "   Reason: instance.webView is NULL");
+                }
             }
         });
     }
