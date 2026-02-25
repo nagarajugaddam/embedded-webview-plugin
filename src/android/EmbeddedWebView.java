@@ -775,18 +775,21 @@ public class EmbeddedWebView extends CordovaPlugin {
                 "}, 0);";
 
         cordova.getActivity().runOnUiThread(() -> {
-            try {
-                if (cordovaWebView != null && cordovaWebView.getEngine() != null) {
+            // Fire event in the EMBEDDED WebView instance (not the main CordovaWebView)
+            WebViewInstance instance = instances.get(id);
+            if (instance != null && instance.webView != null) {
+                try {
                     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
-                        cordovaWebView.getEngine().evaluateJavascript(js, null);
+                        instance.webView.evaluateJavascript(js, null);
                     } else {
-                        cordovaWebView.loadUrl("javascript:" + js);
+                        instance.webView.loadUrl("javascript:" + js);
                     }
-                } else {
-                    Log.e(TAG, "CordovaWebView is null, cannot fire event: " + fullEventName);
+                    Log.d(TAG, "Event fired in embedded WebView: " + fullEventName);
+                } catch (Exception e) {
+                    Log.e(TAG, "Failed to fire event in embedded WebView: " + fullEventName, e);
                 }
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to fire event: " + fullEventName, e);
+            } else {
+                Log.e(TAG, "WebView instance not found for id: " + id + ", cannot fire event: " + fullEventName);
             }
         });
     }
