@@ -409,46 +409,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                         if (cm.message() != null && cm.message().toLowerCase().contains("resizeobserver")) { return true; }
                         return super.onConsoleMessage(cm);
                     }
-
-                    @Override
-                    public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, android.os.Message resultMsg) {
-                        // This handles target="_blank" links and window.open() calls
-                        android.webkit.WebView.WebViewTransport transport = (android.webkit.WebView.WebViewTransport) resultMsg.obj;
-                        
-                        // Get the URL from the new window request
-                        WebView newWebView = new WebView(cordova.getActivity());
-                        newWebView.setWebViewClient(new WebViewClient() {
-                            @Override
-                            public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                                Log.d(TAG, "New window URL (target=_blank): " + url);
-                                
-                                // Check if this URL is blocked
-                                if (isUrlBlocked(url, blockedUrls)) {
-                                    Log.d(TAG, "Navigation blocked (target=_blank) for: " + url);
-                                    fireEvent(id, "loadBlocked", url);
-                                    return true; // Block the navigation
-                                }
-                                
-                                // Handle special schemes (tel, mailto, etc.)
-                                if (url.startsWith("tel:") || url.startsWith("mailto:") || url.startsWith("sms:") || 
-                                    url.startsWith("geo:") || url.startsWith("whatsapp:") || url.startsWith("market:")) {
-                                    try {
-                                        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-                                        view.getContext().startActivity(intent);
-                                    } catch (Exception e) {
-                                        Log.e(TAG, "Error opening external app for url: " + url, e);
-                                    }
-                                    return true;
-                                }
-                                
-                                return false;
-                            }
-                        });
-                        
-                        transport.setWebView(newWebView);
-                        resultMsg.sendToTarget();
-                        return true;
-                    }
                 });
 
                 container.addView(webView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -472,9 +432,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                 instance.historySkipUrls = historySkipUrls;
                 instances.put(id, instance);
                 lastCreatedId = id;
-                Log.d(TAG, "✅ WebView instance created and stored with id: " + id);
-                Log.d(TAG, "   Total instances now: " + instances.size());
-                Log.d(TAG, "   All registered IDs: " + instances.keySet().toString());
 
                 Runnable loadTask = new Runnable() {
                     int attempts = 0;
@@ -757,12 +714,8 @@ public class EmbeddedWebView extends CordovaPlugin {
 
     private void updateNavigationState(final String id) {
         cordova.getActivity().runOnUiThread(() -> {
-            Log.d(TAG, "updateNavigationState called for id: " + id);
             WebViewInstance instance = instances.get(id);
-            if (instance == null || instance.webView == null) {
-                Log.e(TAG, "❌ updateNavigationState: instance not found for id: " + id);
-                return;
-            }
+            if (instance == null || instance.webView == null) return;
             
             boolean newCanGoBack = isEffectiveGoBackAvailable(instance);
             boolean newCanGoForward = instance.webView.canGoForward();
@@ -776,7 +729,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                     JSONObject data = new JSONObject();
                     data.put("value", instance.canGoBack);
                     data.put("url", currentUrl);
-                    Log.d(TAG, "Firing canGoBackChanged event for id: " + id + ", value: " + newCanGoBack);
                     fireEvent(id, "canGoBackChanged", data.toString()); 
                 } catch (JSONException ignored) {}
             }
@@ -787,7 +739,6 @@ public class EmbeddedWebView extends CordovaPlugin {
                     JSONObject data = new JSONObject();
                     data.put("value", instance.canGoForward);
                     data.put("url", currentUrl);
-                    Log.d(TAG, "Firing canGoForwardChanged event for id: " + id + ", value: " + newCanGoForward);
                     fireEvent(id, "canGoForwardChanged", data.toString()); 
                 } catch (JSONException ignored) {}
             }
@@ -802,7 +753,7 @@ public class EmbeddedWebView extends CordovaPlugin {
         });
     }
     
-    // --- UPDATED FIRE EVENT METHOD (Hybrid Approach - Try embedded first, fallback to CordovaWebView) ---
+    // --- UPDATED FIRE EVENT METHOD (Final Robust Version) ---
     private void fireEvent(String id, String eventName, String data) {
         final String fullEventName = "embeddedwebview." + id + "." + eventName;
         
@@ -824,43 +775,18 @@ public class EmbeddedWebView extends CordovaPlugin {
                 "}, 0);";
 
         cordova.getActivity().runOnUiThread(() -> {
-            boolean eventFired = false;
-            
-            // FIRST: Try to fire in the embedded WebView instance
-            WebViewInstance instance = instances.get(id);
-            if (instance != null && instance.webView != null) {
-                try {
+            try {
+                if (cordovaWebView != null && cordovaWebView.getEngine() != null) {
                     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
-                        instance.webView.evaluateJavascript(js, null);
+                        cordovaWebView.getEngine().evaluateJavascript(js, null);
                     } else {
-                        instance.webView.loadUrl("javascript:" + js);
+                        cordovaWebView.loadUrl("javascript:" + js);
                     }
-                    Log.d(TAG, "✅ Event fired in embedded WebView: " + fullEventName);
-                    eventFired = true;
-                } catch (Exception e) {
-                    Log.e(TAG, "Failed to fire event in embedded WebView: " + fullEventName, e);
+                } else {
+                    Log.e(TAG, "CordovaWebView is null, cannot fire event: " + fullEventName);
                 }
-            }
-            
-            // FALLBACK: If embedded WebView not found, try main CordovaWebView
-            if (!eventFired) {
-                try {
-                    if (cordovaWebView != null && cordovaWebView.getEngine() != null) {
-                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
-                            cordovaWebView.getEngine().evaluateJavascript(js, null);
-                        } else {
-                            cordovaWebView.loadUrl("javascript:" + js);
-                        }
-                        Log.d(TAG, "⚠️ Event fired in CordovaWebView (fallback): " + fullEventName);
-                        eventFired = true;
-                    }
-                } catch (Exception e) {
-                    Log.e(TAG, "Failed to fire event in CordovaWebView: " + fullEventName, e);
-                }
-            }
-            
-            if (!eventFired) {
-                Log.e(TAG, "❌ Could not fire event in any WebView: " + fullEventName);
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to fire event: " + fullEventName, e);
             }
         });
     }
