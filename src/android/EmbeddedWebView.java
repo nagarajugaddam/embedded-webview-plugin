@@ -409,6 +409,46 @@ public class EmbeddedWebView extends CordovaPlugin {
                         if (cm.message() != null && cm.message().toLowerCase().contains("resizeobserver")) { return true; }
                         return super.onConsoleMessage(cm);
                     }
+
+                    @Override
+                    public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, android.os.Message resultMsg) {
+                        // This handles target="_blank" links and window.open() calls
+                        android.webkit.WebView.WebViewTransport transport = (android.webkit.WebView.WebViewTransport) resultMsg.obj;
+                        
+                        // Get the URL from the new window request
+                        WebView newWebView = new WebView(cordova.getActivity());
+                        newWebView.setWebViewClient(new WebViewClient() {
+                            @Override
+                            public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                                Log.d(TAG, "New window URL (target=_blank): " + url);
+                                
+                                // Check if this URL is blocked
+                                if (isUrlBlocked(url, blockedUrls)) {
+                                    Log.d(TAG, "Navigation blocked (target=_blank) for: " + url);
+                                    fireEvent(id, "loadBlocked", url);
+                                    return true; // Block the navigation
+                                }
+                                
+                                // Handle special schemes (tel, mailto, etc.)
+                                if (url.startsWith("tel:") || url.startsWith("mailto:") || url.startsWith("sms:") || 
+                                    url.startsWith("geo:") || url.startsWith("whatsapp:") || url.startsWith("market:")) {
+                                    try {
+                                        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                                        view.getContext().startActivity(intent);
+                                    } catch (Exception e) {
+                                        Log.e(TAG, "Error opening external app for url: " + url, e);
+                                    }
+                                    return true;
+                                }
+                                
+                                return false;
+                            }
+                        });
+                        
+                        transport.setWebView(newWebView);
+                        resultMsg.sendToTarget();
+                        return true;
+                    }
                 });
 
                 container.addView(webView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));

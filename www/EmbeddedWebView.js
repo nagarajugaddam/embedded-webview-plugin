@@ -16,15 +16,21 @@ let EmbeddedWebView = {
      * @param {boolean} [options.enableZoom=false] - Enable zoom controls
      * @param {boolean} [options.clearCache=false] - Clear cache before loading
      * @param {string} [options.userAgent] - Custom User-Agent string
+     * @param {array} [options.blockedUrls] - URLs to block (block if URL contains any of these strings)
+     *   Example:
+     *   {
+     *     blockedUrls: ["login.apus.edu", "apply"]
+     *   }
+     * @param {array} [options.historySkipUrls] - URLs to skip in browser history during back navigation
+     * @param {object} [options.cookies] - Cookies to set BEFORE loading the URL
+     *   Example:
+     *   {
+     *     sessionId: "abc123",
+     *     accessToken: "jwt-token"
+     *   }
      * @param {function} [successCallback]
      * @param {function} [errorCallback]
-        * @param {object} [options.cookies] - Cookies to set BEFORE loading the URL
-        *   Example:
-        *   {
-        *     sessionId: "abc123",
-        *     accessToken: "jwt-token"
-        *   }
-        */
+     */
     create: function (id, url, options, successCallback, errorCallback) {
         options = options || {};
 
