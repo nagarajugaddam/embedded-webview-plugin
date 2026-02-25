@@ -802,10 +802,9 @@ public class EmbeddedWebView extends CordovaPlugin {
         });
     }
     
-    // --- UPDATED FIRE EVENT METHOD (Final Robust Version) ---
+    // --- UPDATED FIRE EVENT METHOD (Hybrid Approach - Try embedded first, fallback to CordovaWebView) ---
     private void fireEvent(String id, String eventName, String data) {
         final String fullEventName = "embeddedwebview." + id + "." + eventName;
-        Log.d(TAG, "fireEvent CALLED: id=" + id + ", eventName=" + eventName + ", data=" + data);
         
         String payload;
         if (data != null && data.trim().startsWith("{")) {
@@ -825,11 +824,10 @@ public class EmbeddedWebView extends CordovaPlugin {
                 "}, 0);";
 
         cordova.getActivity().runOnUiThread(() -> {
-            // Fire event in the EMBEDDED WebView instance (not the main CordovaWebView)
-            WebViewInstance instance = instances.get(id);
-            Log.d(TAG, "Looking for WebView instance with id: " + id);
-            Log.d(TAG, "Available instances: " + instances.keySet().toString());
+            boolean eventFired = false;
             
+            // FIRST: Try to fire in the embedded WebView instance
+            WebViewInstance instance = instances.get(id);
             if (instance != null && instance.webView != null) {
                 try {
                     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
@@ -837,17 +835,32 @@ public class EmbeddedWebView extends CordovaPlugin {
                     } else {
                         instance.webView.loadUrl("javascript:" + js);
                     }
-                    Log.d(TAG, "✅ Event fired successfully in embedded WebView: " + fullEventName);
+                    Log.d(TAG, "✅ Event fired in embedded WebView: " + fullEventName);
+                    eventFired = true;
                 } catch (Exception e) {
-                    Log.e(TAG, "❌ Failed to fire event in embedded WebView: " + fullEventName, e);
+                    Log.e(TAG, "Failed to fire event in embedded WebView: " + fullEventName, e);
                 }
-            } else {
-                Log.e(TAG, "❌ WebView instance not found for id: " + id + ", cannot fire event: " + fullEventName);
-                if (instance == null) {
-                    Log.e(TAG, "   Reason: instance is NULL");
-                } else if (instance.webView == null) {
-                    Log.e(TAG, "   Reason: instance.webView is NULL");
+            }
+            
+            // FALLBACK: If embedded WebView not found, try main CordovaWebView
+            if (!eventFired) {
+                try {
+                    if (cordovaWebView != null && cordovaWebView.getEngine() != null) {
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
+                            cordovaWebView.getEngine().evaluateJavascript(js, null);
+                        } else {
+                            cordovaWebView.loadUrl("javascript:" + js);
+                        }
+                        Log.d(TAG, "⚠️ Event fired in CordovaWebView (fallback): " + fullEventName);
+                        eventFired = true;
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "Failed to fire event in CordovaWebView: " + fullEventName, e);
                 }
+            }
+            
+            if (!eventFired) {
+                Log.e(TAG, "❌ Could not fire event in any WebView: " + fullEventName);
             }
         });
     }
