@@ -281,7 +281,8 @@ public class EmbeddedWebView extends CordovaPlugin {
                     progressBar.getProgressDrawable().setColorFilter(Color.parseColor(progressColor), PorterDuff.Mode.SRC_IN);
                 } catch (Exception ignored) {}
 
-                int progressHeightDp = options.optInt("progressHeight", 10);
+                // Always use 10dp for progress bar height to match iOS
+                int progressHeightDp = 10;
                 int progressHeightPx = (int) (progressHeightDp * density);
 
                 FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(
