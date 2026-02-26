@@ -276,7 +276,7 @@ public class EmbeddedWebView extends CordovaPlugin {
 
                 // UI
                 ProgressBar progressBar = new ProgressBar(cordova.getActivity(), null, android.R.attr.progressBarStyleHorizontal);
-                String progressColor = options.optString("progressColor", "#2196F3");
+                String progressColor = options.has("progressColor") ? options.optString("progressColor") : "#007AFF"; // iOS blue
                 try {
                     progressBar.getProgressDrawable().setColorFilter(Color.parseColor(progressColor), PorterDuff.Mode.SRC_IN);
                 } catch (Exception ignored) {}
@@ -333,13 +333,12 @@ public class EmbeddedWebView extends CordovaPlugin {
                     @Override
                     public void onPageStarted(WebView view, String url, Bitmap favicon) {
                         progressBar.setVisibility(View.VISIBLE);
-                        
                         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
                             progressBar.setProgress(0, false);
-                            progressBar.setProgress(15, false); 
+                            progressBar.setProgress(10, true); // Animate to 10% for iOS-like effect
                         } else {
                             progressBar.setProgress(0);
-                            progressBar.setProgress(15);
+                            progressBar.setProgress(10);
                         }
                         
                         // --- FIX: Updated ResizeObserver Logic with Error Suppression ---
@@ -347,9 +346,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                             "var _RO = window.ResizeObserver;" +
                             "if(_RO) { window.ResizeObserver = class extends _RO { constructor(callback) { super((entries, observer) => { window.requestAnimationFrame(() => { callback(entries, observer); }); }); } }; }" +
                             "window.addEventListener('error', function(e) { if (e.message && e.message.indexOf('ResizeObserver loop') !== -1) { e.stopImmediatePropagation(); e.preventDefault(); } });";
-                            
                         view.evaluateJavascript(resizeObserverFix, null);
-                        
                         injectCookies(view, options, cookieDomain);
                         fireEvent(id, "loadStart", url);
                         updateNavigationState(id); 
