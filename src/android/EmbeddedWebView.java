@@ -414,23 +414,19 @@ public class EmbeddedWebView extends CordovaPlugin {
 
                     @Override
                     public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, android.os.Message resultMsg) {
-                        // This handles target="_blank" links and window.open() calls
+                        Log.d(TAG, "onCreateWindow triggered for target=_blank");
                         android.webkit.WebView.WebViewTransport transport = (android.webkit.WebView.WebViewTransport) resultMsg.obj;
-                        
-                        // Get the URL from the new window request
                         WebView newWebView = new WebView(cordova.getActivity());
                         newWebView.setWebViewClient(new WebViewClient() {
                             @Override
                             public boolean shouldOverrideUrlLoading(WebView view, String url) {
                                 Log.d(TAG, "New window URL (target=_blank): " + url);
-                                
                                 // Check if this URL is blocked
                                 if (isUrlBlocked(url, blockedUrls)) {
                                     Log.d(TAG, "Navigation blocked (target=_blank) for: " + url);
                                     fireEvent(id, "loadBlocked", url);
                                     return true; // Block the navigation
                                 }
-                                
                                 // Handle special schemes (tel, mailto, etc.)
                                 if (url.startsWith("tel:") || url.startsWith("mailto:") || url.startsWith("sms:") || 
                                     url.startsWith("geo:") || url.startsWith("whatsapp:") || url.startsWith("market:")) {
@@ -442,13 +438,25 @@ public class EmbeddedWebView extends CordovaPlugin {
                                     }
                                     return true;
                                 }
-                                
                                 return false;
                             }
                         });
-                        
                         transport.setWebView(newWebView);
                         resultMsg.sendToTarget();
+                        // Try to log the URL if available (not always possible)
+                        try {
+                            String possibleUrl = null;
+                            if (view != null && view.getUrl() != null) {
+                                possibleUrl = view.getUrl();
+                                Log.d(TAG, "onCreateWindow: view.getUrl() = " + possibleUrl);
+                                if (isUrlBlocked(possibleUrl, blockedUrls)) {
+                                    Log.d(TAG, "Navigation blocked (onCreateWindow) for: " + possibleUrl);
+                                    fireEvent(id, "loadBlocked", possibleUrl);
+                                }
+                            }
+                        } catch (Exception e) {
+                            Log.e(TAG, "onCreateWindow: error checking possible URL", e);
+                        }
                         return true;
                     }
                 });
