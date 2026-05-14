@@ -143,11 +143,11 @@ public class EmbeddedWebView extends CordovaPlugin {
         return false;
     }
 
-    private void create(
-        final String id,
-        final String url,
-        final JSONObject options,
-        final CallbackContext callbackContext
+   private void create(
+    final String id,
+    final String url,
+    final JSONObject options,
+    final CallbackContext callbackContext
 ) {
     Log.d(TAG, "Creating WebView (id=" + id + ")");
 
@@ -158,35 +158,26 @@ public class EmbeddedWebView extends CordovaPlugin {
 
     cordova.getActivity().runOnUiThread(() -> {
         try {
-            // Layout logic
+            // 1. Calculate Density and Pixels
             float density = cordova.getActivity().getResources().getDisplayMetrics().density;
-            int topOffsetDp = options.optInt("top", 0);
-            int bottomOffsetDp = options.optInt("bottom", 0);
-            int topOffsetPx = (int) (topOffsetDp * density);
-            int bottomOffsetPx = (int) (bottomOffsetDp * density);
+            
+            // We expect raw pixels from JS (header.bottom and footer.height)
+            int topOffsetPx = (int) (options.optInt("top", 0) * density);
+            int bottomOffsetPx = (int) (options.optInt("bottom", 0) * density);
 
-            // ✅ MABS 12 FIX (NO post, apply immediately)
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-                View rootView = cordova.getActivity().getWindow().getDecorView();
-                android.view.WindowInsets insets = rootView.getRootWindowInsets();
+            // 2. Reference the correct View Hierarchy
+            // In MABS 12, we want to attach to the same container as the Cordova WebView
+            View cordovaView = cordovaWebView.getView();
+            ViewGroup rootGroup = (ViewGroup) cordovaView.getParent();
 
-                if (insets != null) {
-                    int statusBarHeight = insets.getSystemWindowInsetTop();
-                    int navBarHeight = insets.getSystemWindowInsetBottom();
-
-                    Log.d(TAG, "Insets -> statusBar: " + statusBarHeight + " navBar: " + navBarHeight);
-
-                    topOffsetPx += statusBarHeight;
-                    bottomOffsetPx += navBarHeight;
-                }
-            }
-
-            View webViewView = cordovaWebView.getView();
-            ViewGroup rootGroup = (ViewGroup) webViewView.getParent();
-
+            // 3. Create the Container
             FrameLayout container = new FrameLayout(cordova.getActivity());
+            
+            // CRITICAL: Disable system inset handling to prevent "Double Padding"
+            container.setFitsSystemWindows(false); 
             container.setBackgroundColor(Color.TRANSPARENT);
 
+            // 4. Initialize WebView
             WebView webView = new WebView(cordova.getActivity());
             WebSettings settings = webView.getSettings();
 
@@ -198,71 +189,47 @@ public class EmbeddedWebView extends CordovaPlugin {
             settings.setLoadWithOverviewMode(true);
             settings.setUseWideViewPort(true);
             settings.setJavaScriptCanOpenWindowsAutomatically(true);
-            settings.setSupportMultipleWindows(true);
 
-            if (options.optBoolean("enableZoom", false)) {
-                settings.setBuiltInZoomControls(true);
-                settings.setDisplayZoomControls(false);
-                settings.setSupportZoom(true);
-            } else {
-                settings.setBuiltInZoomControls(false);
-                settings.setDisplayZoomControls(false);
-                settings.setSupportZoom(false);
-            }
-
-            if (options.optBoolean("clearCache", false)) {
-                webView.clearCache(true);
-            }
-
-            if (options.has("userAgent")) {
-                settings.setUserAgentString(options.getString("userAgent"));
-            }
-
-            webView.setVerticalScrollBarEnabled(false);
-            webView.setHorizontalScrollBarEnabled(false);
-            webView.setOverScrollMode(WebView.OVER_SCROLL_NEVER);
-            webView.setBackgroundColor(Color.TRANSPARENT);
+            // Enable Hardware Acceleration
             webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+            webView.setBackgroundColor(Color.TRANSPARENT);
 
-            // --- ProgressBar ---
+            // 5. Setup Progress Bar (Optional)
             ProgressBar progressBar = new ProgressBar(
                     cordova.getActivity(),
                     null,
                     android.R.attr.progressBarStyleHorizontal
             );
-
-            int progressHeightPx = (int) (10 * density);
-
+            int progressHeightPx = (int) (4 * density);
             FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     progressHeightPx,
-                    Gravity.BOTTOM
+                    Gravity.TOP // Position at the top of the embedded view
             );
 
-            progressBar.setMax(100);
-            progressBar.setVisibility(View.GONE);
-
-            // --- Add views ---
+            // 6. Assemble the View Hierarchy
+            // WebView fills the container entirely
             container.addView(webView, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
             ));
             container.addView(progressBar, progressParams);
 
-            // ✅ FINAL LAYOUT (THIS IS THE KEY FIX)
-            FrameLayout.LayoutParams containerParams =
-                    new FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                    );
+            // 7. Apply the Offsets to the Container
+            FrameLayout.LayoutParams containerParams = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+            );
 
+            // These margins create the "Hole" between Header and Footer
             containerParams.topMargin = topOffsetPx;
             containerParams.bottomMargin = bottomOffsetPx;
 
+            // 8. Attach to Screen
             rootGroup.addView(container, containerParams);
             container.bringToFront();
 
-            // --- Instance ---
+            // Store Instance
             WebViewInstance instance = new WebViewInstance();
             instance.webView = webView;
             instance.container = container;
@@ -270,10 +237,10 @@ public class EmbeddedWebView extends CordovaPlugin {
             instances.put(id, instance);
             lastCreatedId = id;
 
-            // --- Load ---
+            // 9. Final Setup and Load
             webView.loadUrl(url);
 
-            callbackContext.success("WebView created successfully for id=" + id);
+            callbackContext.success("WebView created successfully with top: " + topOffsetPx + "px");
 
         } catch (Exception e) {
             Log.e(TAG, "Error creating WebView", e);
