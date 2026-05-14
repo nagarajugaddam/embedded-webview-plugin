@@ -462,12 +462,41 @@ public class EmbeddedWebView extends CordovaPlugin {
                 container.addView(webView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
                 container.addView(progressBar, progressParams);
 
-                FrameLayout.LayoutParams containerParams = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
-                containerParams.topMargin = topOffsetPx;
-                containerParams.bottomMargin = bottomOffsetPx;
+                // Add the container after the Cordova WebView has been laid out so we can compute
+                // an explicit height that fits between the HTML header and footer. Relying on
+                // MATCH_PARENT + margins allowed fullscreen overlap on some devices (MABS12).
+                webViewView.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            int contentTop = webViewView.getTop() + topOffsetPx;
+                            int webViewHeight = webViewView.getHeight();
+                            int contentHeight = webViewHeight - topOffsetPx - bottomOffsetPx;
+                            if (contentHeight <= 0) {
+                                // fallback to using the full webView height minus offsets
+                                contentHeight = Math.max(0, webViewHeight - topOffsetPx - bottomOffsetPx);
+                            }
 
-                rootGroup.addView(container, containerParams);
-                container.bringToFront();
+                            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    Math.max(0, contentHeight)
+                            );
+                            params.topMargin = contentTop;
+
+                            rootGroup.addView(container, params);
+                            container.bringToFront();
+
+                        } catch (Exception e) {
+                            // If anything goes wrong, fall back to option offsets (old behavior)
+                            FrameLayout.LayoutParams containerParams = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+                            containerParams.topMargin = topOffsetPx;
+                            containerParams.bottomMargin = bottomOffsetPx;
+                            rootGroup.addView(container, containerParams);
+                            container.bringToFront();
+                            Log.w(TAG, "Could not measure CordovaWebView bounds, used fallback margins", e);
+                        }
+                    }
+                });
 
                 // -------------------------------------------------------------------------
                 // COOKIE FLUSH & VERIFY LOOP
