@@ -143,41 +143,40 @@ public class EmbeddedWebView extends CordovaPlugin {
         return false;
     }
 
-   private void create(
-    final String id,
-    final String url,
-    final JSONObject options,
-    final CallbackContext callbackContext
+ private void create(
+        final String id,
+        final String url,
+        final JSONObject options,
+        final CallbackContext callbackContext
 ) {
     Log.d(TAG, "Creating WebView (id=" + id + ")");
 
     if (instances.containsKey(id)) {
-        Log.w(TAG, "WebView already exists for id=" + id + ", destroying first");
         destroy(id, null);
     }
 
     cordova.getActivity().runOnUiThread(() -> {
         try {
-            // 1. Calculate Density and Pixels
-            float density = cordova.getActivity().getResources().getDisplayMetrics().density;
-            
-            // We expect raw pixels from JS (header.bottom and footer.height)
+            // 1. Convert CSS px → Android px
+            float density = cordova.getActivity()
+                    .getResources()
+                    .getDisplayMetrics()
+                    .density;
+
             int topOffsetPx = (int) (options.optInt("top", 0) * density);
             int bottomOffsetPx = (int) (options.optInt("bottom", 0) * density);
 
-            // 2. Reference the correct View Hierarchy
-            // In MABS 12, we want to attach to the same container as the Cordova WebView
+            Log.d(TAG, "Offsets -> topPx=" + topOffsetPx + " bottomPx=" + bottomOffsetPx);
+
+            // 2. Get root view (same parent as Cordova WebView)
             View cordovaView = cordovaWebView.getView();
             ViewGroup rootGroup = (ViewGroup) cordovaView.getParent();
 
-            // 3. Create the Container
+            // 3. Create container
             FrameLayout container = new FrameLayout(cordova.getActivity());
-            
-            // CRITICAL: Disable system inset handling to prevent "Double Padding"
-            container.setFitsSystemWindows(false); 
             container.setBackgroundColor(Color.TRANSPARENT);
 
-            // 4. Initialize WebView
+            // 4. Create WebView
             WebView webView = new WebView(cordova.getActivity());
             WebSettings settings = webView.getSettings();
 
@@ -190,57 +189,40 @@ public class EmbeddedWebView extends CordovaPlugin {
             settings.setUseWideViewPort(true);
             settings.setJavaScriptCanOpenWindowsAutomatically(true);
 
-            // Enable Hardware Acceleration
-            webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
             webView.setBackgroundColor(Color.TRANSPARENT);
+            webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
 
-            // 5. Setup Progress Bar (Optional)
-            ProgressBar progressBar = new ProgressBar(
-                    cordova.getActivity(),
-                    null,
-                    android.R.attr.progressBarStyleHorizontal
-            );
-            int progressHeightPx = (int) (4 * density);
-            FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    progressHeightPx,
-                    Gravity.TOP // Position at the top of the embedded view
-            );
-
-            // 6. Assemble the View Hierarchy
-            // WebView fills the container entirely
+            // 5. Add WebView to container
             container.addView(webView, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
             ));
-            container.addView(progressBar, progressParams);
 
-            // 7. Apply the Offsets to the Container
-            FrameLayout.LayoutParams containerParams = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-            );
+            // 6. Apply margins (THIS creates the correct layout window)
+            FrameLayout.LayoutParams containerParams =
+                    new FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                    );
 
-            // These margins create the "Hole" between Header and Footer
             containerParams.topMargin = topOffsetPx;
             containerParams.bottomMargin = bottomOffsetPx;
 
-            // 8. Attach to Screen
+            // 7. Attach to root
             rootGroup.addView(container, containerParams);
             container.bringToFront();
 
-            // Store Instance
+            // 8. Store instance
             WebViewInstance instance = new WebViewInstance();
             instance.webView = webView;
             instance.container = container;
-            instance.progressBar = progressBar;
             instances.put(id, instance);
             lastCreatedId = id;
 
-            // 9. Final Setup and Load
+            // 9. Load URL
             webView.loadUrl(url);
 
-            callbackContext.success("WebView created successfully with top: " + topOffsetPx + "px");
+            callbackContext.success("WebView created. top=" + topOffsetPx + " bottom=" + bottomOffsetPx);
 
         } catch (Exception e) {
             Log.e(TAG, "Error creating WebView", e);
