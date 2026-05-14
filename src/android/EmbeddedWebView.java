@@ -205,10 +205,10 @@ public class EmbeddedWebView extends CordovaPlugin {
                             ViewGroup.LayoutParams.MATCH_PARENT
                     );
 
-            // containerParams.topMargin = topOffsetPx;
+            containerParams.topMargin = topOffsetPx;
             // containerParams.bottomMargin = bottomOffsetPx;
 
-            containerParams.topMargin = 0;
+            // containerParams.topMargin = 0;
             containerParams.bottomMargin = bottomOffsetPx;
 
             // 7. Attach to root
