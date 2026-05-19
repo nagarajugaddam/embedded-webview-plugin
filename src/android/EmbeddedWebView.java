@@ -189,6 +189,88 @@ public class EmbeddedWebView extends CordovaPlugin {
             settings.setUseWideViewPort(true);
             settings.setJavaScriptCanOpenWindowsAutomatically(true);
 
+            // Respect option to allow external app launches (default: false)
+            final boolean allowExternalApp = options.optBoolean("allowExternalApp", false);
+
+            // Intercept navigations to prevent opening external apps unintentionally
+            webView.setWebViewClient(new WebViewClient() {
+                @Override
+                public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                    return handleUrl(request.getUrl().toString());
+                }
+
+                @Override
+                public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                    return handleUrl(url);
+                }
+
+                private boolean handleUrl(String url) {
+                    if (url == null) return false;
+                    // Block configured blocked URLs
+                    if (isUrlBlocked(url, blockedUrls)) {
+                        Log.d(TAG, "Blocked navigation: " + url);
+                        fireEvent(id, "loadBlocked", url);
+                        return true;
+                    }
+
+                    // Handle intent:// URIs
+                    if (url.startsWith("intent:")) {
+                        if (!allowExternalApp) {
+                            Log.d(TAG, "Blocked intent URI (external apps disabled): " + url);
+                            fireEvent(id, "externalBlocked", url);
+                            return true;
+                        }
+                        try {
+                            Intent intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME);
+                            cordova.getActivity().startActivity(intent);
+                        } catch (Exception e) {
+                            Log.e(TAG, "Failed to handle intent URI", e);
+                        }
+                        return true;
+                    }
+
+                    // Common external schemes
+                    if (url.startsWith("tel:") || url.startsWith("mailto:") || url.startsWith("sms:") || url.startsWith("geo:") || url.startsWith("whatsapp:") || url.startsWith("market:")) {
+                        if (!allowExternalApp) {
+                            Log.d(TAG, "Blocked external scheme (external apps disabled): " + url);
+                            fireEvent(id, "externalBlocked", url);
+                            return true;
+                        }
+                        try {
+                            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                            cordova.getActivity().startActivity(intent);
+                        } catch (Exception e) {
+                            Log.e(TAG, "Error opening external app for url: " + url, e);
+                        }
+                        return true;
+                    }
+
+                    // Allow WebView to load the URL normally
+                    return false;
+                }
+            });
+
+            // Handle target="_blank" by loading in the existing webView instead of launching external browser
+            webView.setWebChromeClient(new WebChromeClient() {
+                @Override
+                public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, android.os.Message resultMsg) {
+                    android.webkit.WebView.WebViewTransport transport = (android.webkit.WebView.WebViewTransport) resultMsg.obj;
+                    WebView newWebView = new WebView(cordova.getActivity());
+                    newWebView.setWebViewClient(new WebViewClient() {
+                        @Override
+                        public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                            try {
+                                if (url != null) webView.loadUrl(url);
+                            } catch (Exception e) { Log.e(TAG, "Error loading url from new window", e); }
+                            return true;
+                        }
+                    });
+                    transport.setWebView(newWebView);
+                    resultMsg.sendToTarget();
+                    return true;
+                }
+            });
+
             webView.setBackgroundColor(Color.TRANSPARENT);
             webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
 
