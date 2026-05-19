@@ -176,15 +176,15 @@ public class EmbeddedWebView extends CordovaPlugin {
                     blockedUrls.add(blockedArr.getString(i));
                 }
             }
-+
-+            // Parse historySkipUrls if provided (used by navigation helpers)
-+            final List<String> historySkipUrls = new ArrayList<>();
-+            if (options.has("historySkipUrls")) {
-+                JSONArray skipArr = options.getJSONArray("historySkipUrls");
-+                for (int i = 0; i < skipArr.length(); i++) {
-+                    historySkipUrls.add(skipArr.getString(i));
-+                }
-+            }
+
+            // Parse historySkipUrls if provided (used by navigation helpers)
+            final List<String> historySkipUrls = new ArrayList<>();
+            if (options.has("historySkipUrls")) {
+                JSONArray skipArr = options.getJSONArray("historySkipUrls");
+                for (int i = 0; i < skipArr.length(); i++) {
+                    historySkipUrls.add(skipArr.getString(i));
+                }
+            }
 
             // 2. Get root view (same parent as Cordova WebView)
             View cordovaView = cordovaWebView.getView();
