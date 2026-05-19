@@ -410,14 +410,19 @@ public class EmbeddedWebView extends CordovaPlugin {
                 }
             });
 
-            // Add progress bar to container so it sits at the bottom
-            container.addView(progressBar, progressParams);
-
-            // 5. Add WebView to container
+            // 5. Add WebView to container (so it occupies full area)
             container.addView(webView, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
             ));
+
+            // Add progress bar to container so it sits above the WebView at the bottom
+            container.addView(progressBar, progressParams);
+            // Ensure progressBar is on top of the WebView
+            progressBar.bringToFront();
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                progressBar.setElevation(10 * density);
+            }
 
             // 6. Apply margins (THIS creates the correct layout window)
             FrameLayout.LayoutParams containerParams =
