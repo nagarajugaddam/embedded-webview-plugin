@@ -168,6 +168,24 @@ public class EmbeddedWebView extends CordovaPlugin {
 
             Log.d(TAG, "Offsets -> topPx=" + topOffsetPx + " bottomPx=" + bottomOffsetPx);
 
+            // Parse blockedUrls from options so navigation checks can reference it
+            final List<String> blockedUrls = new ArrayList<>();
+            if (options.has("blockedUrls")) {
+                JSONArray blockedArr = options.getJSONArray("blockedUrls");
+                for (int i = 0; i < blockedArr.length(); i++) {
+                    blockedUrls.add(blockedArr.getString(i));
+                }
+            }
++
++            // Parse historySkipUrls if provided (used by navigation helpers)
++            final List<String> historySkipUrls = new ArrayList<>();
++            if (options.has("historySkipUrls")) {
++                JSONArray skipArr = options.getJSONArray("historySkipUrls");
++                for (int i = 0; i < skipArr.length(); i++) {
++                    historySkipUrls.add(skipArr.getString(i));
++                }
++            }
+
             // 2. Get root view (same parent as Cordova WebView)
             View cordovaView = cordovaWebView.getView();
             ViewGroup rootGroup = (ViewGroup) cordovaView.getParent();
@@ -301,6 +319,8 @@ public class EmbeddedWebView extends CordovaPlugin {
             WebViewInstance instance = new WebViewInstance();
             instance.webView = webView;
             instance.container = container;
+            instance.blockedUrls = blockedUrls;
+            instance.historySkipUrls = historySkipUrls;
             instances.put(id, instance);
             lastCreatedId = id;
 
