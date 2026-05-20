@@ -168,6 +168,24 @@ public class EmbeddedWebView extends CordovaPlugin {
 
             Log.d(TAG, "Offsets -> topPx=" + topOffsetPx + " bottomPx=" + bottomOffsetPx);
 
+            // Parse blockedUrls from options so navigation checks can reference it
+            final List<String> blockedUrls = new ArrayList<>();
+            if (options.has("blockedUrls")) {
+                JSONArray blockedArr = options.getJSONArray("blockedUrls");
+                for (int i = 0; i < blockedArr.length(); i++) {
+                    blockedUrls.add(blockedArr.getString(i));
+                }
+            }
+
+            // Parse historySkipUrls if provided (used by navigation helpers)
+            final List<String> historySkipUrls = new ArrayList<>();
+            if (options.has("historySkipUrls")) {
+                JSONArray skipArr = options.getJSONArray("historySkipUrls");
+                for (int i = 0; i < skipArr.length(); i++) {
+                    historySkipUrls.add(skipArr.getString(i));
+                }
+            }
+
             // 2. Get root view (same parent as Cordova WebView)
             View cordovaView = cordovaWebView.getView();
             ViewGroup rootGroup = (ViewGroup) cordovaView.getParent();
@@ -189,14 +207,222 @@ public class EmbeddedWebView extends CordovaPlugin {
             settings.setUseWideViewPort(true);
             settings.setJavaScriptCanOpenWindowsAutomatically(true);
 
-            webView.setBackgroundColor(Color.TRANSPARENT);
-            webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+            // --- PROGRESS BAR (bottom) ---
+            ProgressBar progressBar = new ProgressBar(cordova.getActivity(), null, android.R.attr.progressBarStyleHorizontal);
+            String progressColor = options.has("progressColor") ? options.optString("progressColor") : "#007AFF";
+            try { progressBar.getProgressDrawable().setColorFilter(Color.parseColor(progressColor), PorterDuff.Mode.SRC_IN); } catch (Exception ignored) {}
+            int progressHeightDp = 10;
+            int progressHeightPx = (int) (progressHeightDp * density);
+            FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, progressHeightPx, Gravity.BOTTOM);
+            progressBar.setMax(100);
+            progressBar.setVisibility(View.GONE);
 
-            // 5. Add WebView to container
+            // Respect option to allow external app launches (default: false)
+            final boolean allowExternalApp = options.optBoolean("allowExternalApp", false);
+
+            // SINGLE WEBVIEW CLIENT: navigation lifecycle, blocked handling and external scheme interception
+            webView.setWebViewClient(new WebViewClient() {
+
+                private boolean checkBlocked(String url) {
+                    boolean blocked = isUrlBlocked(url, blockedUrls);
+                    if (blocked) {
+                        Log.d(TAG, "Blocked navigation: " + url);
+                        fireEvent(id, "loadBlocked", url);
+                        return true;
+                    }
+                    return false;
+                }
+
+                @Override
+                public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                    return handleNavigation(view, request.getUrl().toString());
+                }
+
+                @Override
+                public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                    return handleNavigation(view, url);
+                }
+
+                private boolean handleNavigation(WebView view, String url) {
+                    if (url == null) return false;
+                    if (checkBlocked(url)) return true;
+
+                    // Handle intent:// URIs
+                    if (url.startsWith("intent:")) {
+                        if (!allowExternalApp) {
+                            Log.d(TAG, "Blocked intent URI (external apps disabled): " + url);
+                            fireEvent(id, "externalBlocked", url);
+                            return true;
+                        }
+                        try {
+                            Intent intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME);
+                            cordova.getActivity().startActivity(intent);
+                        } catch (Exception e) {
+                            Log.e(TAG, "Failed to handle intent URI", e);
+                        }
+                        return true;
+                    }
+
+                    // Common external schemes
+                    if (url.startsWith("tel:") || url.startsWith("mailto:") || url.startsWith("sms:") || url.startsWith("geo:") || url.startsWith("whatsapp:") || url.startsWith("market:")) {
+                        if (!allowExternalApp) {
+                            Log.d(TAG, "Blocked external scheme (external apps disabled): " + url);
+                            fireEvent(id, "externalBlocked", url);
+                            return true;
+                        }
+                        try {
+                            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                            cordova.getActivity().startActivity(intent);
+                        } catch (Exception e) {
+                            Log.e(TAG, "Error opening external app for url: " + url, e);
+                        }
+                        return true;
+                    }
+
+                    // Allow WebView to load the URL normally
+                    return false;
+                }
+
+                @Override
+                public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                    try {
+                        progressBar.setVisibility(View.VISIBLE);
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                            progressBar.setProgress(0, false);
+                            progressBar.setProgress(10, true);
+                        } else {
+                            progressBar.setProgress(0);
+                            progressBar.setProgress(10);
+                        }
+                        injectCookies(view, options, null);
+                        fireEvent(id, "loadStart", url);
+                        updateNavigationState(id);
+                    } catch (Exception e) { Log.e(TAG, "onPageStarted error", e); }
+                }
+
+                @Override
+                public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
+                    super.doUpdateVisitedHistory(view, url, isReload);
+                    updateNavigationState(id);
+                }
+
+                @Override
+                public void onPageFinished(WebView view, String url) {
+                    try {
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) progressBar.setProgress(100, true);
+                        else progressBar.setProgress(100);
+                        progressBar.postDelayed(() -> progressBar.setVisibility(View.GONE), 200);
+                        injectCookies(view, options, null);
+                        updateNavigationState(id);
+                        fireEvent(id, "loadStop", url);
+                    } catch (Exception e) { Log.e(TAG, "onPageFinished error", e); }
+                }
+
+                @Override
+                public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+                    try {
+                        JSONObject err = new JSONObject();
+                        err.put("url", failingUrl);
+                        err.put("code", errorCode);
+                        err.put("message", description);
+                        fireEvent(id, "loadError", err.toString());
+                    } catch (JSONException ignored) {}
+                }
+            });
+
+            // Handle progress and target=_blank via WebChromeClient
+            webView.setWebChromeClient(new WebChromeClient() {
+                @Override
+                public void onProgressChanged(WebView view, int newProgress) {
+                    try {
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                            boolean animate = newProgress > progressBar.getProgress();
+                            progressBar.setProgress(newProgress, animate);
+                        } else {
+                            progressBar.setProgress(newProgress);
+                        }
+
+                        if (newProgress == 100) {
+                            progressBar.setVisibility(View.GONE);
+                        } else {
+                            if (progressBar.getVisibility() == View.GONE) {
+                                progressBar.setVisibility(View.VISIBLE);
+                            }
+                        }
+                    } catch (Exception e) { Log.e(TAG, "onProgressChanged error", e); }
+                }
+
+                @Override
+                public boolean onConsoleMessage(ConsoleMessage cm) {
+                    if (cm.message() != null && cm.message().toLowerCase().contains("resizeobserver")) { return true; }
+                    return super.onConsoleMessage(cm);
+                }
+
+                @Override
+                public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, android.os.Message resultMsg) {
+                    Log.d(TAG, "onCreateWindow triggered for target=_blank");
+                    android.webkit.WebView.WebViewTransport transport = (android.webkit.WebView.WebViewTransport) resultMsg.obj;
+                    WebView newWebView = new WebView(cordova.getActivity());
+                    newWebView.setWebViewClient(new WebViewClient() {
+                        @Override
+                        public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                            Log.d(TAG, "New window URL (target=_blank): " + url);
+                            // Check if this URL is blocked
+                            if (isUrlBlocked(url, blockedUrls)) {
+                                Log.d(TAG, "Navigation blocked (target=_blank) for: " + url);
+                                fireEvent(id, "loadBlocked", url);
+                                return true; // Block the navigation
+                            }
+                            // Handle special schemes (tel, mailto, etc.)
+                            if (url.startsWith("tel:") || url.startsWith("mailto:") || url.startsWith("sms:") || 
+                                url.startsWith("geo:") || url.startsWith("whatsapp:") || url.startsWith("market:")) {
+                                try {
+                                    Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                                    view.getContext().startActivity(intent);
+                                } catch (Exception e) {
+                                    Log.e(TAG, "Error opening external app for url: " + url, e);
+                                }
+                                return true;
+                            }
+                            // Otherwise load inside the primary webView
+                            try { if (url != null) webView.loadUrl(url); } catch (Exception e) { Log.e(TAG, "Error loading url from new window", e); }
+                            return true;
+                        }
+                    });
+                    transport.setWebView(newWebView);
+                    resultMsg.sendToTarget();
+
+                    // Try to log the URL if available (not always possible)
+                    try {
+                        String possibleUrl = null;
+                        if (view != null && view.getUrl() != null) {
+                            possibleUrl = view.getUrl();
+                            Log.d(TAG, "onCreateWindow: view.getUrl() = " + possibleUrl);
+                            if (isUrlBlocked(possibleUrl, blockedUrls)) {
+                                Log.d(TAG, "Navigation blocked (onCreateWindow) for: " + possibleUrl);
+                                fireEvent(id, "loadBlocked", possibleUrl);
+                            }
+                        }
+                    } catch (Exception e) {
+                        Log.e(TAG, "onCreateWindow: error checking possible URL", e);
+                    }
+                    return true;
+                }
+            });
+
+            // 5. Add WebView to container (so it occupies full area)
             container.addView(webView, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
             ));
+
+            // Add progress bar to container so it sits above the WebView at the bottom
+            container.addView(progressBar, progressParams);
+            // Ensure progressBar is on top of the WebView
+            progressBar.bringToFront();
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                progressBar.setElevation(10 * density);
+            }
 
             // 6. Apply margins (THIS creates the correct layout window)
             FrameLayout.LayoutParams containerParams =
@@ -219,6 +445,9 @@ public class EmbeddedWebView extends CordovaPlugin {
             WebViewInstance instance = new WebViewInstance();
             instance.webView = webView;
             instance.container = container;
+            instance.progressBar = progressBar;
+            instance.blockedUrls = blockedUrls;
+            instance.historySkipUrls = historySkipUrls;
             instances.put(id, instance);
             lastCreatedId = id;
 
