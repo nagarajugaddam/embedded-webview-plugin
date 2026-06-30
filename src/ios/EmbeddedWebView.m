@@ -8,6 +8,7 @@
 #import <Cordova/CDV.h>
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
+#import <AVFoundation/AVFoundation.h>
 
 #pragma mark - Instance holder
 
@@ -930,4 +931,101 @@
     while (presentingVC.presentedViewController) { presentingVC = presentingVC.presentedViewController; }
     [presentingVC presentViewController:alertController animated:YES completion:nil];
 }
+
+#pragma mark - Permission Handling for Microphone and Speech Recognition
+
+#if defined(__IPHONE_15_0)
+- (void)webView:(WKWebView *)webView requestMediaCapturePermissionForOrigin:(WKSecurityOrigin *)origin initiatedByFrame:(WKFrameInfo *)frame type:(WKMediaCaptureType)type decisionHandler:(void (^)(WKPermissionDecision))decisionHandler {
+    NSString *typeStr = @"unknown";
+    switch (type) {
+        case WKMediaCaptureTypeAudio:
+            typeStr = @"microphone";
+            NSLog(@"[EmbeddedWebView] Permission requested for microphone (audio)");
+            break;
+        case WKMediaCaptureTypeVideo:
+            typeStr = @"camera";
+            NSLog(@"[EmbeddedWebView] Permission requested for camera (video)");
+            break;
+        case WKMediaCaptureTypeAudioAndVideo:
+            typeStr = @"microphone and camera";
+            NSLog(@"[EmbeddedWebView] Permission requested for microphone and camera");
+            break;
+    }
+    
+    // Handle microphone and audio permissions
+    if (type == WKMediaCaptureTypeAudio || type == WKMediaCaptureTypeAudioAndVideo) {
+        // Check current permission status
+        AVAudioSessionRecordPermission permissionStatus = [AVAudioSession sharedInstance].recordPermission;
+        
+        switch (permissionStatus) {
+            case AVAudioSessionRecordPermissionGranted: {
+                NSLog(@"[EmbeddedWebView] Audio permission already granted");
+                [self configureAudioSession];
+                decisionHandler(WKPermissionDecisionGrant);
+                break;
+            }
+            case AVAudioSessionRecordPermissionDenied: {
+                NSLog(@"[EmbeddedWebView] Audio permission denied by user");
+                decisionHandler(WKPermissionDecisionDeny);
+                break;
+            }
+            case AVAudioSessionRecordPermissionUndetermined: {
+                NSLog(@"[EmbeddedWebView] Requesting audio permission from user");
+                [AVAudioSession.sharedInstance requestRecordPermission:^(BOOL granted) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (granted) {
+                            NSLog(@"[EmbeddedWebView] Audio permission granted by user");
+                            [self configureAudioSession];
+                            decisionHandler(WKPermissionDecisionGrant);
+                        } else {
+                            NSLog(@"[EmbeddedWebView] Audio permission denied by user");
+                            decisionHandler(WKPermissionDecisionDeny);
+                        }
+                    });
+                }];
+                break;
+            }
+        }
+    } else {
+        NSLog(@"[EmbeddedWebView] Denying %@ permission", typeStr);
+        decisionHandler(WKPermissionDecisionDeny);
+    }
+}
+#endif
+
+/**
+ * Configure the audio session for recording
+ */
+- (void)configureAudioSession {
+    @try {
+        AVAudioSession *audioSession = [AVAudioSession sharedInstance];
+        
+          // Use PlayAndRecord so capture works reliably with WebRTC/getUserMedia.
+        NSError *categoryError = nil;
+          [audioSession setCategory:AVAudioSessionCategoryPlayAndRecord 
+                      withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker 
+                            error:&categoryError];
+        
+        if (categoryError) {
+            NSLog(@"[EmbeddedWebView] Error setting audio session category: %@", categoryError.localizedDescription);
+        } else {
+            NSLog(@"[EmbeddedWebView] Audio session category set to PlayAndRecord");
+        }
+        
+        // Activate the audio session
+        NSError *activationError = nil;
+        [audioSession setActive:YES 
+                   withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation 
+                         error:&activationError];
+        
+        if (activationError) {
+            NSLog(@"[EmbeddedWebView] Error activating audio session: %@", activationError.localizedDescription);
+        } else {
+            NSLog(@"[EmbeddedWebView] Audio session activated successfully");
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"[EmbeddedWebView] Exception configuring audio session: %@", exception.reason);
+    }
+}
+
 @end

@@ -30,6 +30,12 @@ let EmbeddedWebView = {
      *   }
      * @param {function} [successCallback]
      * @param {function} [errorCallback]
+     * 
+     * @note MICROPHONE & SPEECH RECOGNITION:
+     *   - Microphone and speech recognition permissions are automatically granted for web content
+     *   - On Android: RECORD_AUDIO and RECORD_AUDIO_HOTWORD permissions are declared in AndroidManifest.xml
+     *   - On iOS: NSMicrophoneUsageDescription and NSSpeechRecognitionUsageDescription are configured in Info.plist
+     *   - Web pages can use getUserMedia() API for microphone access and Web Speech API for speech recognition
      */
     create: function (id, url, options, successCallback, errorCallback) {
         options = options || {};
