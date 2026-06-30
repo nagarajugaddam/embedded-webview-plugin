@@ -73,7 +73,8 @@ public class EmbeddedWebView extends CordovaPlugin {
     }
 
     @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults)
+            throws JSONException {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
 
         if (requestCode != PERMISSION_REQUEST_CODE_AUDIO || pendingPermissionRequest == null) {

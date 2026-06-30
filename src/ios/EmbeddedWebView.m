@@ -42,6 +42,7 @@
 - (UIColor *)colorFromHexString:(NSString *)hexString;
 - (void)handleLoadError:(NSError *)error webView:(WKWebView *)webView;
 - (NSString *)jsonStringFromDictionary:(NSDictionary *)dict; 
+- (UIWindow *)activeWindow;
 
 @end
 
@@ -54,6 +55,37 @@
         _sharedPool = [[WKProcessPool alloc] init];
     });
     return _sharedPool;
+}
+
+- (UIWindow *)activeWindow {
+    UIWindow *window = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) {
+                continue;
+            }
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            if (windowScene.activationState != UISceneActivationStateForegroundActive) {
+                continue;
+            }
+            for (UIWindow *candidate in windowScene.windows) {
+                if (candidate.isKeyWindow) {
+                    return candidate;
+                }
+                if (!window) {
+                    window = candidate;
+                }
+            }
+        }
+    }
+
+    if (!window) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        window = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+    }
+    return window;
 }
 
 - (void)pluginInitialize {
@@ -159,18 +191,7 @@
                 CGFloat safeTop = 0;
                 CGFloat safeBottom = 0;
                 
-                UIWindow *window = nil;
-                if (@available(iOS 13.0, *)) {
-                    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                        if (scene.activationState == UISceneActivationStateForegroundActive) {
-                            for (UIWindow *w in scene.windows) {
-                                if (w.isKeyWindow) { window = w; break; }
-                            }
-                        }
-                        if (window) break;
-                    }
-                }
-                if (!window) window = [UIApplication sharedApplication].keyWindow;
+                UIWindow *window = [self activeWindow];
                 if (window) {
                     safeTop = window.safeAreaInsets.top;
                     safeBottom = window.safeAreaInsets.bottom;
@@ -299,7 +320,7 @@
                 [instance.container addSubview:webView];
                 [instance.container addSubview:progressBar];
 
-                UIView *mainView = self.webView.superview ?: [UIApplication sharedApplication].keyWindow;
+                UIView *mainView = self.webView.superview ?: [self activeWindow];
                 if (!mainView) mainView = self.webView;
                 [mainView addSubview:instance.container];
 
@@ -663,7 +684,15 @@
             return;
         }
 
-        NSString *instanceId = [self instanceIdForWebView:message.webView];
+        WKWebView *messageWebView = nil;
+        if ([message respondsToSelector:@selector(webView)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            messageWebView = [message performSelector:@selector(webView)];
+#pragma clang diagnostic pop
+        }
+
+        NSString *instanceId = messageWebView ? [self instanceIdForWebView:messageWebView] : self.lastCreatedId;
         if (instanceId) {
             NSString *json = [self jsonStringFromDictionary:body];
             [self fireEvent:@"consoleLog" forInstanceId:instanceId withData:json];
@@ -954,6 +983,8 @@
     
     // Handle microphone and audio permissions
     if (type == WKMediaCaptureTypeAudio || type == WKMediaCaptureTypeAudioAndVideo) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         // Check current permission status
         AVAudioSessionRecordPermission permissionStatus = [AVAudioSession sharedInstance].recordPermission;
         
@@ -986,6 +1017,7 @@
                 break;
             }
         }
+#pragma clang diagnostic pop
     } else {
         NSLog(@"[EmbeddedWebView] Denying %@ permission", typeStr);
         decisionHandler(WKPermissionDecisionDeny);
