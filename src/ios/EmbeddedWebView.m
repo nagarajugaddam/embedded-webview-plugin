@@ -967,22 +967,22 @@
 - (void)webView:(WKWebView *)webView requestMediaCapturePermissionForOrigin:(WKSecurityOrigin *)origin initiatedByFrame:(WKFrameInfo *)frame type:(WKMediaCaptureType)type decisionHandler:(void (^)(WKPermissionDecision))decisionHandler {
     NSString *typeStr = @"unknown";
     switch (type) {
-        case WKMediaCaptureTypeAudio:
+        case WKMediaCaptureTypeMicrophone:
             typeStr = @"microphone";
             NSLog(@"[EmbeddedWebView] Permission requested for microphone (audio)");
             break;
-        case WKMediaCaptureTypeVideo:
+        case WKMediaCaptureTypeCamera:
             typeStr = @"camera";
             NSLog(@"[EmbeddedWebView] Permission requested for camera (video)");
             break;
-        case WKMediaCaptureTypeAudioAndVideo:
+        case WKMediaCaptureTypeCameraAndMicrophone:
             typeStr = @"microphone and camera";
             NSLog(@"[EmbeddedWebView] Permission requested for microphone and camera");
             break;
     }
     
     // Handle microphone and audio permissions
-    if (type == WKMediaCaptureTypeAudio || type == WKMediaCaptureTypeAudioAndVideo) {
+    if (type == WKMediaCaptureTypeMicrophone || type == WKMediaCaptureTypeCameraAndMicrophone) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         // Check current permission status
