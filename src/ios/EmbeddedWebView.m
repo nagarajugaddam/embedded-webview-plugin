@@ -8,6 +8,7 @@
 #import <Cordova/CDV.h>
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
+#import <AVFoundation/AVFoundation.h>
 
 #pragma mark - Instance holder
 
@@ -41,6 +42,7 @@
 - (UIColor *)colorFromHexString:(NSString *)hexString;
 - (void)handleLoadError:(NSError *)error webView:(WKWebView *)webView;
 - (NSString *)jsonStringFromDictionary:(NSDictionary *)dict; 
+- (UIWindow *)activeWindow;
 
 @end
 
@@ -53,6 +55,37 @@
         _sharedPool = [[WKProcessPool alloc] init];
     });
     return _sharedPool;
+}
+
+- (UIWindow *)activeWindow {
+    UIWindow *window = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) {
+                continue;
+            }
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            if (windowScene.activationState != UISceneActivationStateForegroundActive) {
+                continue;
+            }
+            for (UIWindow *candidate in windowScene.windows) {
+                if (candidate.isKeyWindow) {
+                    return candidate;
+                }
+                if (!window) {
+                    window = candidate;
+                }
+            }
+        }
+    }
+
+    if (!window) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        window = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+    }
+    return window;
 }
 
 - (void)pluginInitialize {
@@ -158,18 +191,7 @@
                 CGFloat safeTop = 0;
                 CGFloat safeBottom = 0;
                 
-                UIWindow *window = nil;
-                if (@available(iOS 13.0, *)) {
-                    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                        if (scene.activationState == UISceneActivationStateForegroundActive) {
-                            for (UIWindow *w in scene.windows) {
-                                if (w.isKeyWindow) { window = w; break; }
-                            }
-                        }
-                        if (window) break;
-                    }
-                }
-                if (!window) window = [UIApplication sharedApplication].keyWindow;
+                UIWindow *window = [self activeWindow];
                 if (window) {
                     safeTop = window.safeAreaInsets.top;
                     safeBottom = window.safeAreaInsets.bottom;
@@ -298,7 +320,7 @@
                 [instance.container addSubview:webView];
                 [instance.container addSubview:progressBar];
 
-                UIView *mainView = self.webView.superview ?: [UIApplication sharedApplication].keyWindow;
+                UIView *mainView = self.webView.superview ?: [self activeWindow];
                 if (!mainView) mainView = self.webView;
                 [mainView addSubview:instance.container];
 
@@ -662,7 +684,15 @@
             return;
         }
 
-        NSString *instanceId = [self instanceIdForWebView:message.webView];
+        WKWebView *messageWebView = nil;
+        if ([message respondsToSelector:@selector(webView)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            messageWebView = [message performSelector:@selector(webView)];
+#pragma clang diagnostic pop
+        }
+
+        NSString *instanceId = messageWebView ? [self instanceIdForWebView:messageWebView] : self.lastCreatedId;
         if (instanceId) {
             NSString *json = [self jsonStringFromDictionary:body];
             [self fireEvent:@"consoleLog" forInstanceId:instanceId withData:json];
@@ -930,4 +960,104 @@
     while (presentingVC.presentedViewController) { presentingVC = presentingVC.presentedViewController; }
     [presentingVC presentViewController:alertController animated:YES completion:nil];
 }
+
+#pragma mark - Permission Handling for Microphone and Speech Recognition
+
+#if defined(__IPHONE_15_0)
+- (void)webView:(WKWebView *)webView requestMediaCapturePermissionForOrigin:(WKSecurityOrigin *)origin initiatedByFrame:(WKFrameInfo *)frame type:(WKMediaCaptureType)type decisionHandler:(void (^)(WKPermissionDecision))decisionHandler {
+    NSString *typeStr = @"unknown";
+    switch (type) {
+        case WKMediaCaptureTypeMicrophone:
+            typeStr = @"microphone";
+            NSLog(@"[EmbeddedWebView] Permission requested for microphone (audio)");
+            break;
+        case WKMediaCaptureTypeCamera:
+            typeStr = @"camera";
+            NSLog(@"[EmbeddedWebView] Permission requested for camera (video)");
+            break;
+        case WKMediaCaptureTypeCameraAndMicrophone:
+            typeStr = @"microphone and camera";
+            NSLog(@"[EmbeddedWebView] Permission requested for microphone and camera");
+            break;
+    }
+    
+    // Handle microphone and audio permissions
+    if (type == WKMediaCaptureTypeMicrophone || type == WKMediaCaptureTypeCameraAndMicrophone) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        // Check current permission status
+        AVAudioSessionRecordPermission permissionStatus = [AVAudioSession sharedInstance].recordPermission;
+        
+        switch (permissionStatus) {
+            case AVAudioSessionRecordPermissionGranted: {
+                NSLog(@"[EmbeddedWebView] Audio permission already granted");
+                [self configureAudioSession];
+                decisionHandler(WKPermissionDecisionGrant);
+                break;
+            }
+            case AVAudioSessionRecordPermissionDenied: {
+                NSLog(@"[EmbeddedWebView] Audio permission denied by user");
+                decisionHandler(WKPermissionDecisionDeny);
+                break;
+            }
+            case AVAudioSessionRecordPermissionUndetermined: {
+                NSLog(@"[EmbeddedWebView] Requesting audio permission from user");
+                [AVAudioSession.sharedInstance requestRecordPermission:^(BOOL granted) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (granted) {
+                            NSLog(@"[EmbeddedWebView] Audio permission granted by user");
+                            [self configureAudioSession];
+                            decisionHandler(WKPermissionDecisionGrant);
+                        } else {
+                            NSLog(@"[EmbeddedWebView] Audio permission denied by user");
+                            decisionHandler(WKPermissionDecisionDeny);
+                        }
+                    });
+                }];
+                break;
+            }
+        }
+#pragma clang diagnostic pop
+    } else {
+        NSLog(@"[EmbeddedWebView] Denying %@ permission", typeStr);
+        decisionHandler(WKPermissionDecisionDeny);
+    }
+}
+#endif
+
+/**
+ * Configure the audio session for recording
+ */
+- (void)configureAudioSession {
+    @try {
+        AVAudioSession *audioSession = [AVAudioSession sharedInstance];
+        
+          // Use PlayAndRecord so capture works reliably with WebRTC/getUserMedia.
+        NSError *categoryError = nil;
+          [audioSession setCategory:AVAudioSessionCategoryPlayAndRecord 
+                      withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker 
+                            error:&categoryError];
+        
+        if (categoryError) {
+            NSLog(@"[EmbeddedWebView] Error setting audio session category: %@", categoryError.localizedDescription);
+        } else {
+            NSLog(@"[EmbeddedWebView] Audio session category set to PlayAndRecord");
+        }
+        
+        // Activate the audio session
+        NSError *activationError = nil;
+        [audioSession setActive:YES 
+                   withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation 
+                         error:&activationError];
+        
+        if (activationError) {
+            NSLog(@"[EmbeddedWebView] Error activating audio session: %@", activationError.localizedDescription);
+        } else {
+            NSLog(@"[EmbeddedWebView] Audio session activated successfully");
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"[EmbeddedWebView] Exception configuring audio session: %@", exception.reason);
+    }
+}
+
 @end

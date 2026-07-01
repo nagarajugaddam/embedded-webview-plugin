@@ -37,10 +37,19 @@ import java.net.URL;
 import java.net.MalformedURLException;
 import android.content.Intent;
 import android.net.Uri;
+import android.Manifest;
+import android.content.pm.PackageManager;
+
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 
 public class EmbeddedWebView extends CordovaPlugin {
 
     private static final String TAG = "EmbeddedWebView";
+    private static final int PERMISSION_REQUEST_CODE_AUDIO = 100;
+
+    private android.webkit.PermissionRequest pendingPermissionRequest;
+    private String[] pendingPermissionResources;
 
     private static class WebViewInstance {
         WebView webView;
@@ -61,6 +70,29 @@ public class EmbeddedWebView extends CordovaPlugin {
     public void initialize(CordovaInterface cordova, CordovaWebView webView) {
         super.initialize(cordova, webView);
         this.cordovaWebView = webView;
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults)
+            throws JSONException {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+
+        if (requestCode != PERMISSION_REQUEST_CODE_AUDIO || pendingPermissionRequest == null) {
+            return;
+        }
+
+        if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            Log.d(TAG, "RECORD_AUDIO permission granted by user");
+            pendingPermissionRequest.grant(pendingPermissionResources != null
+                    ? pendingPermissionResources
+                    : new String[]{android.webkit.PermissionRequest.RESOURCE_AUDIO_CAPTURE});
+        } else {
+            Log.d(TAG, "RECORD_AUDIO permission denied by user");
+            pendingPermissionRequest.deny();
+        }
+
+        pendingPermissionRequest = null;
+        pendingPermissionResources = null;
     }
 
     @Override
@@ -407,6 +439,45 @@ public class EmbeddedWebView extends CordovaPlugin {
                         Log.e(TAG, "onCreateWindow: error checking possible URL", e);
                     }
                     return true;
+                }
+
+                @Override
+                public void onPermissionRequest(final android.webkit.PermissionRequest request) {
+                    String[] resources = request.getResources();
+                    boolean requestsAudio = false;
+
+                    if (resources != null) {
+                        for (String resource : resources) {
+                            if (android.webkit.PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)) {
+                                requestsAudio = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!requestsAudio) {
+                        request.deny();
+                        return;
+                    }
+
+                    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M) {
+                        request.grant(resources);
+                        return;
+                    }
+
+                    if (ContextCompat.checkSelfPermission(cordova.getActivity(), Manifest.permission.RECORD_AUDIO)
+                            == PackageManager.PERMISSION_GRANTED) {
+                        request.grant(resources);
+                        return;
+                    }
+
+                    pendingPermissionRequest = request;
+                    pendingPermissionResources = resources;
+                    ActivityCompat.requestPermissions(
+                            cordova.getActivity(),
+                            new String[]{Manifest.permission.RECORD_AUDIO},
+                            PERMISSION_REQUEST_CODE_AUDIO
+                    );
                 }
             });
 
