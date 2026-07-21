@@ -59,7 +59,62 @@ public class EmbeddedWebView extends CordovaPlugin {
         boolean canGoForward = false;
         List<String> blockedUrls;
         List<String> historySkipUrls;
+        String lastReportedUrl;
     }
+
+    // JS bridge used to report SPA client-side URL changes (Navigation API / history) back to native.
+    private class UrlBridge {
+        private final String id;
+        UrlBridge(String id) { this.id = id; }
+
+        @android.webkit.JavascriptInterface
+        public void onUrlChange(final String url) {
+            cordova.getActivity().runOnUiThread(() -> fireUrlChanged(id, url));
+        }
+    }
+
+    // Injected at page start/finish. Hooks history + Navigation API and reports the full URL.
+    private static final String URL_TRACK_SCRIPT =
+        "(function(){" +
+        "  if (window.__ewvUrlHookInstalled) return;" +
+        "  window.__ewvUrlHookInstalled = true;" +
+        "  var post = function(u){" +
+        "    try { if (window.EWVUrlBridge && window.EWVUrlBridge.onUrlChange) window.EWVUrlBridge.onUrlChange(u || location.href); } catch(e){}" +
+        "  };" +
+        "  var wrap = function(type){" +
+        "    var orig = history[type];" +
+        "    if (typeof orig !== 'function') return;" +
+        "    history[type] = function(){" +
+        "      var rv = orig.apply(this, arguments);" +
+        "      post();" +
+        "      return rv;" +
+        "    };" +
+        "  };" +
+        "  wrap('pushState');" +
+        "  wrap('replaceState');" +
+        "  window.addEventListener('popstate', function(){ post(); });" +
+        "  window.addEventListener('hashchange', function(){ post(); });" +
+        "  var navHooked = false;" +
+        "  var hookNav = function(){" +
+        "    if (navHooked) return true;" +
+        "    if (!(window.navigation && window.navigation.addEventListener)) return false;" +
+        "    navHooked = true;" +
+        "    window.navigation.addEventListener('navigate', function(e){" +
+        "      try { post(e.destination && e.destination.url ? e.destination.url : location.href); } catch(err){ post(); }" +
+        "    });" +
+        "    window.navigation.addEventListener('navigatesuccess', function(){ post(); });" +
+        "    return true;" +
+        "  };" +
+        "  if (!hookNav()) {" +
+        "    var tries = 0;" +
+        "    var t = setInterval(function(){" +
+        "      if (hookNav() || ++tries > 100) clearInterval(t);" +
+        "    }, 100);" +
+        "    document.addEventListener('DOMContentLoaded', hookNav);" +
+        "    window.addEventListener('load', hookNav);" +
+        "  }" +
+        "  post();" +
+        "})();";
 
     private final Map<String, WebViewInstance> instances = new HashMap<>();
     private String lastCreatedId = null;
@@ -239,6 +294,9 @@ public class EmbeddedWebView extends CordovaPlugin {
             settings.setUseWideViewPort(true);
             settings.setJavaScriptCanOpenWindowsAutomatically(true);
 
+            // Bridge for SPA client-side URL change reporting
+            webView.addJavascriptInterface(new UrlBridge(id), "EWVUrlBridge");
+
             // --- PROGRESS BAR (bottom) ---
             ProgressBar progressBar = new ProgressBar(cordova.getActivity(), null, android.R.attr.progressBarStyleHorizontal);
             String progressColor = options.has("progressColor") ? options.optString("progressColor") : "#007AFF";
@@ -327,6 +385,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                             progressBar.setProgress(10);
                         }
                         injectCookies(view, options, null);
+                        view.evaluateJavascript(URL_TRACK_SCRIPT, null);
                         fireEvent(id, "loadStart", url);
                         updateNavigationState(id);
                     } catch (Exception e) { Log.e(TAG, "onPageStarted error", e); }
@@ -336,6 +395,8 @@ public class EmbeddedWebView extends CordovaPlugin {
                 public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
                     super.doUpdateVisitedHistory(view, url, isReload);
                     updateNavigationState(id);
+                    // Native fallback for SPA client-side navigations (pushState/replaceState/Navigation API).
+                    fireUrlChanged(id, url);
                 }
 
                 @Override
@@ -345,6 +406,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                         else progressBar.setProgress(100);
                         progressBar.postDelayed(() -> progressBar.setVisibility(View.GONE), 200);
                         injectCookies(view, options, null);
+                        view.evaluateJavascript(URL_TRACK_SCRIPT, null);
                         updateNavigationState(id);
                         fireEvent(id, "loadStop", url);
                     } catch (Exception e) { Log.e(TAG, "onPageFinished error", e); }
@@ -785,6 +847,17 @@ public class EmbeddedWebView extends CordovaPlugin {
         });
     }
     
+    // De-duped emit of urlChanged for SPA client-side navigations.
+    private void fireUrlChanged(String id, String url) {
+        if (url == null || url.isEmpty()) return;
+        WebViewInstance instance = instances.get(id);
+        if (instance == null) return;
+        if (url.equals(instance.lastReportedUrl)) return;
+        instance.lastReportedUrl = url;
+        fireEvent(id, "urlChanged", url);
+        updateNavigationState(id);
+    }
+
     // --- UPDATED FIRE EVENT METHOD (Final Robust Version) ---
     private void fireEvent(String id, String eventName, String data) {
         final String fullEventName = "embeddedwebview." + id + "." + eventName;
