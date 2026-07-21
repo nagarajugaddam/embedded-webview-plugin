@@ -21,6 +21,7 @@
 @property (nonatomic, strong) NSDictionary *cookies;
 @property (nonatomic, strong) NSArray *blockedUrls; 
 @property (nonatomic, strong) NSArray *historySkipUrls; 
+@property (nonatomic, copy) NSString *lastReportedUrl;
 @end
 
 @implementation EmbeddedWebViewInstance
@@ -246,6 +247,38 @@
             [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:debugScript injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
             [config.userContentController addScriptMessageHandler:self name:@"consoleHandler"];
 
+            // --- 3b. SPA URL CHANGE TRACKING ---
+            // WKWebView navigation delegate + URL KVO do not reliably fire for client-side
+            // (same-document) navigations used by SPAs. Hook history/Navigation APIs to report
+            // the full URL back to native, which then fires the `urlChanged` JS event.
+            NSString *urlTrackScript =
+                @"(function(){"
+                @"  if (window.__ewvUrlHookInstalled) return;"
+                @"  window.__ewvUrlHookInstalled = true;"
+                @"  var post = function(){"
+                @"    try { window.webkit.messageHandlers.urlChangeHandler.postMessage(location.href); } catch(e){}"
+                @"  };"
+                @"  var wrap = function(type){"
+                @"    var orig = history[type];"
+                @"    if (typeof orig !== 'function') return;"
+                @"    history[type] = function(){"
+                @"      var rv = orig.apply(this, arguments);"
+                @"      post();"
+                @"      return rv;"
+                @"    };"
+                @"  };"
+                @"  wrap('pushState');"
+                @"  wrap('replaceState');"
+                @"  window.addEventListener('popstate', post);"
+                @"  window.addEventListener('hashchange', post);"
+                @"  if (window.navigation && window.navigation.addEventListener) {"
+                @"    window.navigation.addEventListener('navigatesuccess', post);"
+                @"  }"
+                @"  post();"
+                @"})();";
+            [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:urlTrackScript injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
+            [config.userContentController addScriptMessageHandler:self name:@"urlChangeHandler"];
+
             // --- 4. COOKIE PREP ---
             NSURL *pageURL = [NSURL URLWithString:url];
             NSString *rawHost = pageURL.host;
@@ -455,6 +488,7 @@
             @try { [instance.webView removeObserver:self forKeyPath:@"URL"]; } @catch(NSException *e){}
 
             @try { [instance.webView.configuration.userContentController removeScriptMessageHandlerForName:@"consoleHandler"]; } @catch(NSException *e){}
+            @try { [instance.webView.configuration.userContentController removeScriptMessageHandlerForName:@"urlChangeHandler"]; } @catch(NSException *e){}
             
             [instance.webView stopLoading];
             [instance.webView removeFromSuperview]; // <--- Critical: Removes from screen
@@ -680,6 +714,32 @@
 }
 
 - (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
+    if ([message.name isEqualToString:@"urlChangeHandler"]) {
+        NSString *newUrl = [message.body isKindOfClass:[NSString class]] ? (NSString *)message.body : nil;
+        if (!newUrl.length) return;
+
+        WKWebView *messageWebView = nil;
+        if ([message respondsToSelector:@selector(webView)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            messageWebView = [message performSelector:@selector(webView)];
+#pragma clang diagnostic pop
+        }
+
+        NSString *instanceId = messageWebView ? [self instanceIdForWebView:messageWebView] : self.lastCreatedId;
+        if (!instanceId) return;
+
+        EmbeddedWebViewInstance *instance = self.instances[instanceId];
+        if (!instance) return;
+
+        // De-dupe: ignore if URL hasn't actually changed since last report
+        if ([instance.lastReportedUrl isEqualToString:newUrl]) return;
+        instance.lastReportedUrl = newUrl;
+
+        [self fireEvent:@"urlChanged" forInstanceId:instanceId withData:newUrl];
+        [self updateNavigationStateForInstanceId:instanceId];
+        return;
+    }
     if ([message.name isEqualToString:@"consoleHandler"]) {
         NSDictionary *body = message.body;
         NSString *msg = body[@"msg"] ?: @"";
@@ -881,15 +941,19 @@
         }
     } 
     else if ([keyPath isEqualToString:@"URL"]) {
-        // Fires on SPA route changes (pushState/replaceState/hash) as well as full loads.
+        // Fallback for same-document navigations. The injected history/Navigation hook is the
+        // primary source; this only fires if that URL wasn't already reported (de-duped).
         WKWebView *webView = (WKWebView *)object;
         NSString *instanceId = [self instanceIdForWebView:webView];
         EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
         if (instance && !instance.container.hidden) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 NSString *currentUrl = webView.URL.absoluteString ?: @"";
-                [self fireEvent:@"urlChanged" forInstanceId:instanceId withData:currentUrl];
-                [self updateNavigationStateForInstanceId:instanceId];
+                if (currentUrl.length && ![instance.lastReportedUrl isEqualToString:currentUrl]) {
+                    instance.lastReportedUrl = currentUrl;
+                    [self fireEvent:@"urlChanged" forInstanceId:instanceId withData:currentUrl];
+                    [self updateNavigationStateForInstanceId:instanceId];
+                }
             });
         }
     } 
