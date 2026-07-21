@@ -257,7 +257,11 @@ let EmbeddedWebView = {
      *
      * @param {string} id - WebView instance id
      * @param {string} eventName - loadStart, loadStop, loadError,
-     *                             navigationStateChanged, canGoBackChanged, canGoForwardChanged
+     *                             navigationStateChanged, canGoBackChanged, canGoForwardChanged,
+     *                             urlChanged
+     *   Note: loadStart/loadStop only fire on full page loads. For single-page apps (SPA)
+     *   that change routes client-side (pushState/replaceState/hash), listen to `urlChanged`
+     *   (event.detail = full URL string) or `navigationStateChanged` (event.detail.url).
      * @param {function} callback - (event) => {}
      */
     addEventListener: function (id, eventName, callback) {

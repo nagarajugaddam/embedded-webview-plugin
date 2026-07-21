@@ -310,6 +310,8 @@
                 [webView addObserver:self forKeyPath:@"canGoBack" options:NSKeyValueObservingOptionNew context:nil];
                 [webView addObserver:self forKeyPath:@"canGoForward" options:NSKeyValueObservingOptionNew context:nil];
                 [webView addObserver:self forKeyPath:@"loading" options:NSKeyValueObservingOptionNew context:nil];
+                // Observe URL directly so SPA route changes (pushState/replaceState/hash) are reported with the full URL
+                [webView addObserver:self forKeyPath:@"URL" options:NSKeyValueObservingOptionNew context:nil];
 
 
                 UIProgressView *progressBar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
@@ -450,6 +452,7 @@
             @try { [instance.webView removeObserver:self forKeyPath:@"canGoBack"]; } @catch(NSException *e){}
             @try { [instance.webView removeObserver:self forKeyPath:@"canGoForward"]; } @catch(NSException *e){}
             @try { [instance.webView removeObserver:self forKeyPath:@"loading"]; } @catch(NSException *e){}
+            @try { [instance.webView removeObserver:self forKeyPath:@"URL"]; } @catch(NSException *e){}
 
             @try { [instance.webView.configuration.userContentController removeScriptMessageHandlerForName:@"consoleHandler"]; } @catch(NSException *e){}
             
@@ -873,6 +876,19 @@
         NSString *instanceId = [self instanceIdForWebView:webView];
         if (instanceId) {
             dispatch_async(dispatch_get_main_queue(), ^{
+                [self updateNavigationStateForInstanceId:instanceId];
+            });
+        }
+    } 
+    else if ([keyPath isEqualToString:@"URL"]) {
+        // Fires on SPA route changes (pushState/replaceState/hash) as well as full loads.
+        WKWebView *webView = (WKWebView *)object;
+        NSString *instanceId = [self instanceIdForWebView:webView];
+        EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
+        if (instance && !instance.container.hidden) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSString *currentUrl = webView.URL.absoluteString ?: @"";
+                [self fireEvent:@"urlChanged" forInstanceId:instanceId withData:currentUrl];
                 [self updateNavigationStateForInstanceId:instanceId];
             });
         }
