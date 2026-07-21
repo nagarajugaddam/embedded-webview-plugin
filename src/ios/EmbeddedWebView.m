@@ -271,13 +271,25 @@
                 @"  wrap('replaceState');"
                 @"  window.addEventListener('popstate', function(){ post(); });"
                 @"  window.addEventListener('hashchange', function(){ post(); });"
-                @"  if (window.navigation && window.navigation.addEventListener) {"
-                // 'navigate' fires for Navigation API routing (used by SPAs that don't call pushState).
-                // Use the destination URL since location.href isn't updated yet at this point.
+                // window.navigation may not exist yet at document-start; retry until available.
+                @"  var navHooked = false;"
+                @"  var hookNav = function(){"
+                @"    if (navHooked) return true;"
+                @"    if (!(window.navigation && window.navigation.addEventListener)) return false;"
+                @"    navHooked = true;"
                 @"    window.navigation.addEventListener('navigate', function(e){"
                 @"      try { post(e.destination && e.destination.url ? e.destination.url : location.href); } catch(err){ post(); }"
                 @"    });"
                 @"    window.navigation.addEventListener('navigatesuccess', function(){ post(); });"
+                @"    return true;"
+                @"  };"
+                @"  if (!hookNav()) {"
+                @"    var tries = 0;"
+                @"    var t = setInterval(function(){"
+                @"      if (hookNav() || ++tries > 100) clearInterval(t);"
+                @"    }, 100);"
+                @"    document.addEventListener('DOMContentLoaded', hookNav);"
+                @"    window.addEventListener('load', hookNav);"
                 @"  }"
                 @"  post();"
                 @"})();";
