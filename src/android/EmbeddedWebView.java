@@ -128,6 +128,23 @@ public class EmbeddedWebView extends CordovaPlugin {
     }
 
     @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        // On orientation/size changes, force each embedded WebView container to re-measure and
+        // re-layout so it instantly fits below the header and above the footer.
+        cordova.getActivity().runOnUiThread(() -> {
+            for (WebViewInstance instance : instances.values()) {
+                if (instance != null && instance.container != null) {
+                    ViewGroup parent = (ViewGroup) instance.container.getParent();
+                    if (parent != null) parent.requestLayout();
+                    instance.container.requestLayout();
+                    instance.container.invalidate();
+                }
+            }
+        });
+    }
+
+    @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults)
             throws JSONException {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
