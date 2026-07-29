@@ -189,17 +189,6 @@
                 // --- 1. LAYOUT & WINDOW FINDER ---
                 NSNumber *topOffset = options[@"top"] ?: @0;
                 NSNumber *bottomOffset = options[@"bottom"] ?: @0;
-                CGFloat safeTop = 0;
-                CGFloat safeBottom = 0;
-                
-                UIWindow *window = [self activeWindow];
-                if (window) {
-                    safeTop = window.safeAreaInsets.top;
-                    safeBottom = window.safeAreaInsets.bottom;
-                }
-
-                CGFloat finalTopMargin = safeTop + [topOffset floatValue];
-                CGFloat finalBottomMargin = safeBottom + [bottomOffset floatValue];
 
                 instance.container = [[UIView alloc] init];
                 instance.container.backgroundColor = [UIColor clearColor];
@@ -385,8 +374,10 @@
                 [NSLayoutConstraint activateConstraints:@[
                     [instance.container.leadingAnchor constraintEqualToAnchor:mainView.leadingAnchor],
                     [instance.container.trailingAnchor constraintEqualToAnchor:mainView.trailingAnchor],
-                    [instance.container.topAnchor constraintEqualToAnchor:mainView.topAnchor constant:finalTopMargin],
-                    [instance.container.bottomAnchor constraintEqualToAnchor:mainView.bottomAnchor constant:-finalBottomMargin],
+                    // Anchor to the safe-area guide (plus the app-provided header/footer offsets) so the
+                    // layout re-adjusts automatically & instantly on orientation changes.
+                    [instance.container.topAnchor constraintEqualToAnchor:mainView.safeAreaLayoutGuide.topAnchor constant:[topOffset floatValue]],
+                    [instance.container.bottomAnchor constraintEqualToAnchor:mainView.safeAreaLayoutGuide.bottomAnchor constant:-[bottomOffset floatValue]],
                     [webView.leadingAnchor constraintEqualToAnchor:instance.container.leadingAnchor],
                     [webView.trailingAnchor constraintEqualToAnchor:instance.container.trailingAnchor],
                     [webView.topAnchor constraintEqualToAnchor:instance.container.topAnchor],
