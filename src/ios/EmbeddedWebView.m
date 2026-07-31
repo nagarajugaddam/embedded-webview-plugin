@@ -18,6 +18,7 @@
 @property (nonatomic, strong) UIView *container;
 @property (nonatomic, assign) BOOL canGoBack;
 @property (nonatomic, assign) BOOL canGoForward;
+@property (nonatomic, assign) BOOL historyCleared;
 @property (nonatomic, strong) NSDictionary *cookies;
 @property (nonatomic, strong) NSArray *blockedUrls; 
 @property (nonatomic, strong) NSArray *historySkipUrls; 
@@ -148,6 +149,7 @@
     EmbeddedWebViewInstance *instance = [[EmbeddedWebViewInstance alloc] init];
     instance.canGoBack = NO;
     instance.canGoForward = NO;
+    instance.historyCleared = NO;
 
     if ([options[@"cookies"] isKindOfClass:[NSDictionary class]]) {
         instance.cookies = options[@"cookies"];
@@ -552,6 +554,7 @@
         // ----------------------------------------------------------
 
         @try {
+            instance.historyCleared = NO;
             NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
             if (headers) {
                 for (NSString *key in headers) [request setValue:headers[key] forHTTPHeaderField:key];
@@ -633,6 +636,11 @@
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
         
         if (instance && instance.webView) {
+            if (instance.historyCleared) {
+                [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
+                return;
+            }
+
             if ([instance.webView isLoading]) {
                 [instance.webView stopLoading];
             }
@@ -694,6 +702,7 @@
         [instance.webView stopLoading];
 
         // Reset navigation state
+        instance.historyCleared = YES;
         instance.canGoBack = NO;
         instance.canGoForward = NO;
         instance.lastReportedUrl = instance.webView.URL.absoluteString;
@@ -713,7 +722,12 @@
     NSString *instanceId = [command argumentAtIndex:0];
     dispatch_async(dispatch_get_main_queue(), ^{
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
-        if (instance && [instance.webView canGoForward]) {
+        if (!instance) return;
+        if (instance.historyCleared) {
+            [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
+            return;
+        }
+        if ([instance.webView canGoForward]) {
             [instance.webView goForward];
             [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
         }
@@ -733,6 +747,7 @@
 
 - (BOOL)isEffectiveGoBackAvailable:(EmbeddedWebViewInstance *)instance {
     if (!instance || !instance.webView) return NO;
+    if (instance.historyCleared) return NO;
     if (![instance.webView canGoBack]) return NO;
     if (!instance.historySkipUrls || instance.historySkipUrls.count == 0) return YES;
     
@@ -1005,7 +1020,7 @@
     if (!instance || !instance.webView) return;
     
     BOOL newCanGoBack = [self isEffectiveGoBackAvailable:instance];
-    BOOL newCanGoForward = [instance.webView canGoForward];
+    BOOL newCanGoForward = instance.historyCleared ? NO : [instance.webView canGoForward];
     NSString *currentUrl = instance.webView.URL.absoluteString ?: @"";
     
     if (newCanGoBack != instance.canGoBack) {
