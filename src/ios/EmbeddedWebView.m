@@ -679,6 +679,36 @@
     });
 }
 
+- (void)clearHistory:(CDVInvokedUrlCommand *)command {
+
+    NSString *instanceId = [command argumentAtIndex:0];
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+
+        EmbeddedWebViewInstance *instance =
+            [self instanceForId:instanceId command:command];
+
+        if (!instance) return;
+
+        // Stop loading
+        [instance.webView stopLoading];
+
+        // Reset navigation state
+        instance.canGoBack = NO;
+        instance.canGoForward = NO;
+        instance.lastReportedUrl = instance.webView.URL.absoluteString;
+
+        [self updateNavigationStateForInstanceId:instanceId];
+
+        CDVPluginResult *result =
+            [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
+                              messageAsString:@"History reset"];
+
+        [self.commandDelegate sendPluginResult:result
+                                    callbackId:command.callbackId];
+    });
+}
+
 - (void)goForward:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     dispatch_async(dispatch_get_main_queue(), ^{

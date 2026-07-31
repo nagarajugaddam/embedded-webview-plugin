@@ -221,6 +221,11 @@ public class EmbeddedWebView extends CordovaPlugin {
             this.canGoBack(id, callbackContext);
             return true;
         }
+        if ("clearHistory".equals(action)) {
+            String id = args.getString(0);
+            this.clearHistory(id, callbackContext);
+            return true;
+        }
         return false;
     }
 
@@ -814,6 +819,36 @@ public class EmbeddedWebView extends CordovaPlugin {
                 if (callbackContext != null) callbackContext.success(effective ? 1 : 0); 
             }
         });
+    }
+
+    private void clearHistory(final String id, final CallbackContext callbackContext) {
+    cordova.getActivity().runOnUiThread(() -> {
+
+        WebViewInstance instance = getInstance(id, callbackContext);
+        if (instance == null) return;
+
+        try {
+
+            instance.webView.stopLoading();
+
+            // Clear browser history
+            instance.webView.clearHistory();
+
+            // Reset navigation state
+            instance.canGoBack = false;
+            instance.canGoForward = false;
+            updateNavigationState(id);
+
+            if (callbackContext != null) {
+                callbackContext.success("History cleared");
+            }
+
+        } catch (Exception e) {
+            if (callbackContext != null) {
+                callbackContext.error(e.getMessage());
+            }
+        }
+    });
     }
 
     private Map<String, String> jsonToMap(JSONObject json) throws JSONException {
