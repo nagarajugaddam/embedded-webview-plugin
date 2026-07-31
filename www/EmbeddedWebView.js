@@ -196,6 +196,20 @@ let EmbeddedWebView = {
 
         exec(successCallback, errorCallback, 'EmbeddedWebView', 'goForward', [id]);
     },
+    clearHistory: function (id, successCallback, errorCallback) {
+        if (!id || typeof id !== 'string') {
+            errorCallback && errorCallback('id must be a non-empty string');
+            return;
+        }
+
+        exec(
+            successCallback,
+            errorCallback,
+            'EmbeddedWebView',
+            'clearHistory',
+            [id]
+        );
+    },
 
     /**
      * Ask native if this instance can go back
@@ -209,6 +223,8 @@ let EmbeddedWebView = {
 
         exec(successCallback, errorCallback, 'EmbeddedWebView', 'canGoBack', [id]);
     },
+
+    
 
     /**
      * Helper: Inject authentication token into a specific instance (storage-safe)
