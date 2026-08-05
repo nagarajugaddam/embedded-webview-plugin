@@ -261,7 +261,11 @@ public class EmbeddedWebView extends CordovaPlugin {
     Log.d(TAG, "Creating WebView (id=" + id + ")");
 
     if (instances.containsKey(id)) {
-        destroy(id, null);
+        Log.d(TAG, "Instance already exists for id=" + id + ", ignoring duplicate create");
+        if (callbackContext != null) {
+            callbackContext.success("WebView instance already exists");
+        }
+        return;
     }
 
     cordova.getActivity().runOnUiThread(() -> {

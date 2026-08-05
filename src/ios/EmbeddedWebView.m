@@ -178,7 +178,9 @@
     }
 
     if (self.instances[instanceId]) {
-        [self destroyInstanceWithId:instanceId sendCallback:NO callbackId:nil];
+        NSLog(@"[EmbeddedWebView] Instance already exists for id: %@, ignoring duplicate create", instanceId);
+        [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:@"WebView instance already exists"] callbackId:command.callbackId];
+        return;
     }
 
     [self.commandDelegate runInBackground:^{
