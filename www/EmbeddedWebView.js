@@ -30,6 +30,12 @@ let EmbeddedWebView = {
      *   }
      * @param {function} [successCallback]
      * @param {function} [errorCallback]
+     * 
+     * @note MICROPHONE & SPEECH RECOGNITION:
+     *   - Microphone and speech recognition permissions are automatically granted for web content
+     *   - On Android: RECORD_AUDIO and RECORD_AUDIO_HOTWORD permissions are declared in AndroidManifest.xml
+     *   - On iOS: NSMicrophoneUsageDescription and NSSpeechRecognitionUsageDescription are configured in Info.plist
+     *   - Web pages can use getUserMedia() API for microphone access and Web Speech API for speech recognition
      */
     create: function (id, url, options, successCallback, errorCallback) {
         options = options || {};
@@ -190,6 +196,20 @@ let EmbeddedWebView = {
 
         exec(successCallback, errorCallback, 'EmbeddedWebView', 'goForward', [id]);
     },
+    clearHistory: function (id, successCallback, errorCallback) {
+        if (!id || typeof id !== 'string') {
+            errorCallback && errorCallback('id must be a non-empty string');
+            return;
+        }
+
+        exec(
+            successCallback,
+            errorCallback,
+            'EmbeddedWebView',
+            'clearHistory',
+            [id]
+        );
+    },
 
     /**
      * Ask native if this instance can go back
@@ -203,6 +223,8 @@ let EmbeddedWebView = {
 
         exec(successCallback, errorCallback, 'EmbeddedWebView', 'canGoBack', [id]);
     },
+
+    
 
     /**
      * Helper: Inject authentication token into a specific instance (storage-safe)
@@ -251,7 +273,11 @@ let EmbeddedWebView = {
      *
      * @param {string} id - WebView instance id
      * @param {string} eventName - loadStart, loadStop, loadError,
-     *                             navigationStateChanged, canGoBackChanged, canGoForwardChanged
+     *                             navigationStateChanged, canGoBackChanged, canGoForwardChanged,
+     *                             urlChanged
+     *   Note: loadStart/loadStop only fire on full page loads. For single-page apps (SPA)
+     *   that change routes client-side (pushState/replaceState/hash), listen to `urlChanged`
+     *   (event.detail = full URL string) or `navigationStateChanged` (event.detail.url).
      * @param {function} callback - (event) => {}
      */
     addEventListener: function (id, eventName, callback) {

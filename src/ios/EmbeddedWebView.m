@@ -8,6 +8,7 @@
 #import <Cordova/CDV.h>
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
+#import <AVFoundation/AVFoundation.h>
 
 #pragma mark - Instance holder
 
@@ -17,9 +18,11 @@
 @property (nonatomic, strong) UIView *container;
 @property (nonatomic, assign) BOOL canGoBack;
 @property (nonatomic, assign) BOOL canGoForward;
+@property (nonatomic, assign) BOOL historyCleared;
 @property (nonatomic, strong) NSDictionary *cookies;
 @property (nonatomic, strong) NSArray *blockedUrls; 
 @property (nonatomic, strong) NSArray *historySkipUrls; 
+@property (nonatomic, copy) NSString *lastReportedUrl;
 @end
 
 @implementation EmbeddedWebViewInstance
@@ -41,6 +44,7 @@
 - (UIColor *)colorFromHexString:(NSString *)hexString;
 - (void)handleLoadError:(NSError *)error webView:(WKWebView *)webView;
 - (NSString *)jsonStringFromDictionary:(NSDictionary *)dict; 
+- (UIWindow *)activeWindow;
 
 @end
 
@@ -53,6 +57,37 @@
         _sharedPool = [[WKProcessPool alloc] init];
     });
     return _sharedPool;
+}
+
+- (UIWindow *)activeWindow {
+    UIWindow *window = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) {
+                continue;
+            }
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            if (windowScene.activationState != UISceneActivationStateForegroundActive) {
+                continue;
+            }
+            for (UIWindow *candidate in windowScene.windows) {
+                if (candidate.isKeyWindow) {
+                    return candidate;
+                }
+                if (!window) {
+                    window = candidate;
+                }
+            }
+        }
+    }
+
+    if (!window) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        window = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+    }
+    return window;
 }
 
 - (void)pluginInitialize {
@@ -114,6 +149,7 @@
     EmbeddedWebViewInstance *instance = [[EmbeddedWebViewInstance alloc] init];
     instance.canGoBack = NO;
     instance.canGoForward = NO;
+    instance.historyCleared = NO;
 
     if ([options[@"cookies"] isKindOfClass:[NSDictionary class]]) {
         instance.cookies = options[@"cookies"];
@@ -155,28 +191,6 @@
                 // --- 1. LAYOUT & WINDOW FINDER ---
                 NSNumber *topOffset = options[@"top"] ?: @0;
                 NSNumber *bottomOffset = options[@"bottom"] ?: @0;
-                CGFloat safeTop = 0;
-                CGFloat safeBottom = 0;
-                
-                UIWindow *window = nil;
-                if (@available(iOS 13.0, *)) {
-                    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                        if (scene.activationState == UISceneActivationStateForegroundActive) {
-                            for (UIWindow *w in scene.windows) {
-                                if (w.isKeyWindow) { window = w; break; }
-                            }
-                        }
-                        if (window) break;
-                    }
-                }
-                if (!window) window = [UIApplication sharedApplication].keyWindow;
-                if (window) {
-                    safeTop = window.safeAreaInsets.top;
-                    safeBottom = window.safeAreaInsets.bottom;
-                }
-
-                CGFloat finalTopMargin = safeTop + [topOffset floatValue];
-                CGFloat finalBottomMargin = safeBottom + [bottomOffset floatValue];
 
                 instance.container = [[UIView alloc] init];
                 instance.container.backgroundColor = [UIColor clearColor];
@@ -223,6 +237,55 @@
 
             [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:debugScript injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
             [config.userContentController addScriptMessageHandler:self name:@"consoleHandler"];
+
+            // --- 3b. SPA URL CHANGE TRACKING ---
+            // WKWebView navigation delegate + URL KVO do not reliably fire for client-side
+            // (same-document) navigations used by SPAs. Hook history/Navigation APIs to report
+            // the full URL back to native, which then fires the `urlChanged` JS event.
+            NSString *urlTrackScript =
+                @"(function(){"
+                @"  if (window.__ewvUrlHookInstalled) return;"
+                @"  window.__ewvUrlHookInstalled = true;"
+                @"  var post = function(u){"
+                @"    try { window.webkit.messageHandlers.urlChangeHandler.postMessage(u || location.href); } catch(e){}"
+                @"  };"
+                @"  var wrap = function(type){"
+                @"    var orig = history[type];"
+                @"    if (typeof orig !== 'function') return;"
+                @"    history[type] = function(){"
+                @"      var rv = orig.apply(this, arguments);"
+                @"      post();"
+                @"      return rv;"
+                @"    };"
+                @"  };"
+                @"  wrap('pushState');"
+                @"  wrap('replaceState');"
+                @"  window.addEventListener('popstate', function(){ post(); });"
+                @"  window.addEventListener('hashchange', function(){ post(); });"
+                // window.navigation may not exist yet at document-start; retry until available.
+                @"  var navHooked = false;"
+                @"  var hookNav = function(){"
+                @"    if (navHooked) return true;"
+                @"    if (!(window.navigation && window.navigation.addEventListener)) return false;"
+                @"    navHooked = true;"
+                @"    window.navigation.addEventListener('navigate', function(e){"
+                @"      try { post(e.destination && e.destination.url ? e.destination.url : location.href); } catch(err){ post(); }"
+                @"    });"
+                @"    window.navigation.addEventListener('navigatesuccess', function(){ post(); });"
+                @"    return true;"
+                @"  };"
+                @"  if (!hookNav()) {"
+                @"    var tries = 0;"
+                @"    var t = setInterval(function(){"
+                @"      if (hookNav() || ++tries > 100) clearInterval(t);"
+                @"    }, 100);"
+                @"    document.addEventListener('DOMContentLoaded', hookNav);"
+                @"    window.addEventListener('load', hookNav);"
+                @"  }"
+                @"  post();"
+                @"})();";
+            [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:urlTrackScript injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
+            [config.userContentController addScriptMessageHandler:self name:@"urlChangeHandler"];
 
             // --- 4. COOKIE PREP ---
             NSURL *pageURL = [NSURL URLWithString:url];
@@ -288,6 +351,8 @@
                 [webView addObserver:self forKeyPath:@"canGoBack" options:NSKeyValueObservingOptionNew context:nil];
                 [webView addObserver:self forKeyPath:@"canGoForward" options:NSKeyValueObservingOptionNew context:nil];
                 [webView addObserver:self forKeyPath:@"loading" options:NSKeyValueObservingOptionNew context:nil];
+                // Observe URL directly so SPA route changes (pushState/replaceState/hash) are reported with the full URL
+                [webView addObserver:self forKeyPath:@"URL" options:NSKeyValueObservingOptionNew context:nil];
 
 
                 UIProgressView *progressBar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
@@ -298,7 +363,7 @@
                 [instance.container addSubview:webView];
                 [instance.container addSubview:progressBar];
 
-                UIView *mainView = self.webView.superview ?: [UIApplication sharedApplication].keyWindow;
+                UIView *mainView = self.webView.superview ?: [self activeWindow];
                 if (!mainView) mainView = self.webView;
                 [mainView addSubview:instance.container];
 
@@ -311,8 +376,10 @@
                 [NSLayoutConstraint activateConstraints:@[
                     [instance.container.leadingAnchor constraintEqualToAnchor:mainView.leadingAnchor],
                     [instance.container.trailingAnchor constraintEqualToAnchor:mainView.trailingAnchor],
-                    [instance.container.topAnchor constraintEqualToAnchor:mainView.topAnchor constant:finalTopMargin],
-                    [instance.container.bottomAnchor constraintEqualToAnchor:mainView.bottomAnchor constant:-finalBottomMargin],
+                    // Anchor to the safe-area guide (plus the app-provided header/footer offsets) so the
+                    // layout re-adjusts automatically & instantly on orientation changes.
+                    [instance.container.topAnchor constraintEqualToAnchor:mainView.safeAreaLayoutGuide.topAnchor constant:[topOffset floatValue]],
+                    [instance.container.bottomAnchor constraintEqualToAnchor:mainView.safeAreaLayoutGuide.bottomAnchor constant:-[bottomOffset floatValue]],
                     [webView.leadingAnchor constraintEqualToAnchor:instance.container.leadingAnchor],
                     [webView.trailingAnchor constraintEqualToAnchor:instance.container.trailingAnchor],
                     [webView.topAnchor constraintEqualToAnchor:instance.container.topAnchor],
@@ -428,8 +495,10 @@
             @try { [instance.webView removeObserver:self forKeyPath:@"canGoBack"]; } @catch(NSException *e){}
             @try { [instance.webView removeObserver:self forKeyPath:@"canGoForward"]; } @catch(NSException *e){}
             @try { [instance.webView removeObserver:self forKeyPath:@"loading"]; } @catch(NSException *e){}
+            @try { [instance.webView removeObserver:self forKeyPath:@"URL"]; } @catch(NSException *e){}
 
             @try { [instance.webView.configuration.userContentController removeScriptMessageHandlerForName:@"consoleHandler"]; } @catch(NSException *e){}
+            @try { [instance.webView.configuration.userContentController removeScriptMessageHandlerForName:@"urlChangeHandler"]; } @catch(NSException *e){}
             
             [instance.webView stopLoading];
             [instance.webView removeFromSuperview]; // <--- Critical: Removes from screen
@@ -485,6 +554,7 @@
         // ----------------------------------------------------------
 
         @try {
+            instance.historyCleared = NO;
             NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
             if (headers) {
                 for (NSString *key in headers) [request setValue:headers[key] forHTTPHeaderField:key];
@@ -566,6 +636,11 @@
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
         
         if (instance && instance.webView) {
+            if (instance.historyCleared) {
+                [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
+                return;
+            }
+
             if ([instance.webView isLoading]) {
                 [instance.webView stopLoading];
             }
@@ -612,11 +687,47 @@
     });
 }
 
+- (void)clearHistory:(CDVInvokedUrlCommand *)command {
+
+    NSString *instanceId = [command argumentAtIndex:0];
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+
+        EmbeddedWebViewInstance *instance =
+            [self instanceForId:instanceId command:command];
+
+        if (!instance) return;
+
+        // Stop loading
+        [instance.webView stopLoading];
+
+        // Reset navigation state
+        instance.historyCleared = YES;
+        instance.canGoBack = NO;
+        instance.canGoForward = NO;
+        instance.lastReportedUrl = instance.webView.URL.absoluteString;
+
+        [self updateNavigationStateForInstanceId:instanceId];
+
+        CDVPluginResult *result =
+            [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
+                              messageAsString:@"History reset"];
+
+        [self.commandDelegate sendPluginResult:result
+                                    callbackId:command.callbackId];
+    });
+}
+
 - (void)goForward:(CDVInvokedUrlCommand*)command {
     NSString *instanceId = [command argumentAtIndex:0];
     dispatch_async(dispatch_get_main_queue(), ^{
         EmbeddedWebViewInstance *instance = [self instanceForId:instanceId command:command];
-        if (instance && [instance.webView canGoForward]) {
+        if (!instance) return;
+        if (instance.historyCleared) {
+            [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
+            return;
+        }
+        if ([instance.webView canGoForward]) {
             [instance.webView goForward];
             [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
         }
@@ -636,6 +747,7 @@
 
 - (BOOL)isEffectiveGoBackAvailable:(EmbeddedWebViewInstance *)instance {
     if (!instance || !instance.webView) return NO;
+    if (instance.historyCleared) return NO;
     if (![instance.webView canGoBack]) return NO;
     if (!instance.historySkipUrls || instance.historySkipUrls.count == 0) return YES;
     
@@ -655,6 +767,32 @@
 }
 
 - (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
+    if ([message.name isEqualToString:@"urlChangeHandler"]) {
+        NSString *newUrl = [message.body isKindOfClass:[NSString class]] ? (NSString *)message.body : nil;
+        if (!newUrl.length) return;
+
+        WKWebView *messageWebView = nil;
+        if ([message respondsToSelector:@selector(webView)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            messageWebView = [message performSelector:@selector(webView)];
+#pragma clang diagnostic pop
+        }
+
+        NSString *instanceId = messageWebView ? [self instanceIdForWebView:messageWebView] : self.lastCreatedId;
+        if (!instanceId) return;
+
+        EmbeddedWebViewInstance *instance = self.instances[instanceId];
+        if (!instance) return;
+
+        // De-dupe: ignore if URL hasn't actually changed since last report
+        if ([instance.lastReportedUrl isEqualToString:newUrl]) return;
+        instance.lastReportedUrl = newUrl;
+
+        [self fireEvent:@"urlChanged" forInstanceId:instanceId withData:newUrl];
+        [self updateNavigationStateForInstanceId:instanceId];
+        return;
+    }
     if ([message.name isEqualToString:@"consoleHandler"]) {
         NSDictionary *body = message.body;
         NSString *msg = body[@"msg"] ?: @"";
@@ -662,7 +800,15 @@
             return;
         }
 
-        NSString *instanceId = [self instanceIdForWebView:message.webView];
+        WKWebView *messageWebView = nil;
+        if ([message respondsToSelector:@selector(webView)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            messageWebView = [message performSelector:@selector(webView)];
+#pragma clang diagnostic pop
+        }
+
+        NSString *instanceId = messageWebView ? [self instanceIdForWebView:messageWebView] : self.lastCreatedId;
         if (instanceId) {
             NSString *json = [self jsonStringFromDictionary:body];
             [self fireEvent:@"consoleLog" forInstanceId:instanceId withData:json];
@@ -847,6 +993,23 @@
             });
         }
     } 
+    else if ([keyPath isEqualToString:@"URL"]) {
+        // Fallback for same-document navigations. The injected history/Navigation hook is the
+        // primary source; this only fires if that URL wasn't already reported (de-duped).
+        WKWebView *webView = (WKWebView *)object;
+        NSString *instanceId = [self instanceIdForWebView:webView];
+        EmbeddedWebViewInstance *instance = instanceId ? self.instances[instanceId] : nil;
+        if (instance && !instance.container.hidden) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSString *currentUrl = webView.URL.absoluteString ?: @"";
+                if (currentUrl.length && ![instance.lastReportedUrl isEqualToString:currentUrl]) {
+                    instance.lastReportedUrl = currentUrl;
+                    [self fireEvent:@"urlChanged" forInstanceId:instanceId withData:currentUrl];
+                    [self updateNavigationStateForInstanceId:instanceId];
+                }
+            });
+        }
+    } 
     else {
         [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
     }
@@ -857,7 +1020,7 @@
     if (!instance || !instance.webView) return;
     
     BOOL newCanGoBack = [self isEffectiveGoBackAvailable:instance];
-    BOOL newCanGoForward = [instance.webView canGoForward];
+    BOOL newCanGoForward = instance.historyCleared ? NO : [instance.webView canGoForward];
     NSString *currentUrl = instance.webView.URL.absoluteString ?: @"";
     
     if (newCanGoBack != instance.canGoBack) {
@@ -930,4 +1093,104 @@
     while (presentingVC.presentedViewController) { presentingVC = presentingVC.presentedViewController; }
     [presentingVC presentViewController:alertController animated:YES completion:nil];
 }
+
+#pragma mark - Permission Handling for Microphone and Speech Recognition
+
+#if defined(__IPHONE_15_0)
+- (void)webView:(WKWebView *)webView requestMediaCapturePermissionForOrigin:(WKSecurityOrigin *)origin initiatedByFrame:(WKFrameInfo *)frame type:(WKMediaCaptureType)type decisionHandler:(void (^)(WKPermissionDecision))decisionHandler {
+    NSString *typeStr = @"unknown";
+    switch (type) {
+        case WKMediaCaptureTypeMicrophone:
+            typeStr = @"microphone";
+            NSLog(@"[EmbeddedWebView] Permission requested for microphone (audio)");
+            break;
+        case WKMediaCaptureTypeCamera:
+            typeStr = @"camera";
+            NSLog(@"[EmbeddedWebView] Permission requested for camera (video)");
+            break;
+        case WKMediaCaptureTypeCameraAndMicrophone:
+            typeStr = @"microphone and camera";
+            NSLog(@"[EmbeddedWebView] Permission requested for microphone and camera");
+            break;
+    }
+    
+    // Handle microphone and audio permissions
+    if (type == WKMediaCaptureTypeMicrophone || type == WKMediaCaptureTypeCameraAndMicrophone) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        // Check current permission status
+        AVAudioSessionRecordPermission permissionStatus = [AVAudioSession sharedInstance].recordPermission;
+        
+        switch (permissionStatus) {
+            case AVAudioSessionRecordPermissionGranted: {
+                NSLog(@"[EmbeddedWebView] Audio permission already granted");
+                [self configureAudioSession];
+                decisionHandler(WKPermissionDecisionGrant);
+                break;
+            }
+            case AVAudioSessionRecordPermissionDenied: {
+                NSLog(@"[EmbeddedWebView] Audio permission denied by user");
+                decisionHandler(WKPermissionDecisionDeny);
+                break;
+            }
+            case AVAudioSessionRecordPermissionUndetermined: {
+                NSLog(@"[EmbeddedWebView] Requesting audio permission from user");
+                [AVAudioSession.sharedInstance requestRecordPermission:^(BOOL granted) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (granted) {
+                            NSLog(@"[EmbeddedWebView] Audio permission granted by user");
+                            [self configureAudioSession];
+                            decisionHandler(WKPermissionDecisionGrant);
+                        } else {
+                            NSLog(@"[EmbeddedWebView] Audio permission denied by user");
+                            decisionHandler(WKPermissionDecisionDeny);
+                        }
+                    });
+                }];
+                break;
+            }
+        }
+#pragma clang diagnostic pop
+    } else {
+        NSLog(@"[EmbeddedWebView] Denying %@ permission", typeStr);
+        decisionHandler(WKPermissionDecisionDeny);
+    }
+}
+#endif
+
+/**
+ * Configure the audio session for recording
+ */
+- (void)configureAudioSession {
+    @try {
+        AVAudioSession *audioSession = [AVAudioSession sharedInstance];
+        
+          // Use PlayAndRecord so capture works reliably with WebRTC/getUserMedia.
+        NSError *categoryError = nil;
+          [audioSession setCategory:AVAudioSessionCategoryPlayAndRecord 
+                      withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker 
+                            error:&categoryError];
+        
+        if (categoryError) {
+            NSLog(@"[EmbeddedWebView] Error setting audio session category: %@", categoryError.localizedDescription);
+        } else {
+            NSLog(@"[EmbeddedWebView] Audio session category set to PlayAndRecord");
+        }
+        
+        // Activate the audio session
+        NSError *activationError = nil;
+        [audioSession setActive:YES 
+                   withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation 
+                         error:&activationError];
+        
+        if (activationError) {
+            NSLog(@"[EmbeddedWebView] Error activating audio session: %@", activationError.localizedDescription);
+        } else {
+            NSLog(@"[EmbeddedWebView] Audio session activated successfully");
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"[EmbeddedWebView] Exception configuring audio session: %@", exception.reason);
+    }
+}
+
 @end

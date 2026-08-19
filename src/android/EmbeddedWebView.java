@@ -37,10 +37,19 @@ import java.net.URL;
 import java.net.MalformedURLException;
 import android.content.Intent;
 import android.net.Uri;
+import android.Manifest;
+import android.content.pm.PackageManager;
+
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 
 public class EmbeddedWebView extends CordovaPlugin {
 
     private static final String TAG = "EmbeddedWebView";
+    private static final int PERMISSION_REQUEST_CODE_AUDIO = 100;
+
+    private android.webkit.PermissionRequest pendingPermissionRequest;
+    private String[] pendingPermissionResources;
 
     private static class WebViewInstance {
         WebView webView;
@@ -50,7 +59,62 @@ public class EmbeddedWebView extends CordovaPlugin {
         boolean canGoForward = false;
         List<String> blockedUrls;
         List<String> historySkipUrls;
+        String lastReportedUrl;
     }
+
+    // JS bridge used to report SPA client-side URL changes (Navigation API / history) back to native.
+    private class UrlBridge {
+        private final String id;
+        UrlBridge(String id) { this.id = id; }
+
+        @android.webkit.JavascriptInterface
+        public void onUrlChange(final String url) {
+            cordova.getActivity().runOnUiThread(() -> fireUrlChanged(id, url));
+        }
+    }
+
+    // Injected at page start/finish. Hooks history + Navigation API and reports the full URL.
+    private static final String URL_TRACK_SCRIPT =
+        "(function(){" +
+        "  if (window.__ewvUrlHookInstalled) return;" +
+        "  window.__ewvUrlHookInstalled = true;" +
+        "  var post = function(u){" +
+        "    try { if (window.EWVUrlBridge && window.EWVUrlBridge.onUrlChange) window.EWVUrlBridge.onUrlChange(u || location.href); } catch(e){}" +
+        "  };" +
+        "  var wrap = function(type){" +
+        "    var orig = history[type];" +
+        "    if (typeof orig !== 'function') return;" +
+        "    history[type] = function(){" +
+        "      var rv = orig.apply(this, arguments);" +
+        "      post();" +
+        "      return rv;" +
+        "    };" +
+        "  };" +
+        "  wrap('pushState');" +
+        "  wrap('replaceState');" +
+        "  window.addEventListener('popstate', function(){ post(); });" +
+        "  window.addEventListener('hashchange', function(){ post(); });" +
+        "  var navHooked = false;" +
+        "  var hookNav = function(){" +
+        "    if (navHooked) return true;" +
+        "    if (!(window.navigation && window.navigation.addEventListener)) return false;" +
+        "    navHooked = true;" +
+        "    window.navigation.addEventListener('navigate', function(e){" +
+        "      try { post(e.destination && e.destination.url ? e.destination.url : location.href); } catch(err){ post(); }" +
+        "    });" +
+        "    window.navigation.addEventListener('navigatesuccess', function(){ post(); });" +
+        "    return true;" +
+        "  };" +
+        "  if (!hookNav()) {" +
+        "    var tries = 0;" +
+        "    var t = setInterval(function(){" +
+        "      if (hookNav() || ++tries > 100) clearInterval(t);" +
+        "    }, 100);" +
+        "    document.addEventListener('DOMContentLoaded', hookNav);" +
+        "    window.addEventListener('load', hookNav);" +
+        "  }" +
+        "  post();" +
+        "})();";
 
     private final Map<String, WebViewInstance> instances = new HashMap<>();
     private String lastCreatedId = null;
@@ -61,6 +125,46 @@ public class EmbeddedWebView extends CordovaPlugin {
     public void initialize(CordovaInterface cordova, CordovaWebView webView) {
         super.initialize(cordova, webView);
         this.cordovaWebView = webView;
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        // On orientation/size changes, force each embedded WebView container to re-measure and
+        // re-layout so it instantly fits below the header and above the footer.
+        cordova.getActivity().runOnUiThread(() -> {
+            for (WebViewInstance instance : instances.values()) {
+                if (instance != null && instance.container != null) {
+                    ViewGroup parent = (ViewGroup) instance.container.getParent();
+                    if (parent != null) parent.requestLayout();
+                    instance.container.requestLayout();
+                    instance.container.invalidate();
+                }
+            }
+        });
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults)
+            throws JSONException {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+
+        if (requestCode != PERMISSION_REQUEST_CODE_AUDIO || pendingPermissionRequest == null) {
+            return;
+        }
+
+        if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            Log.d(TAG, "RECORD_AUDIO permission granted by user");
+            pendingPermissionRequest.grant(pendingPermissionResources != null
+                    ? pendingPermissionResources
+                    : new String[]{android.webkit.PermissionRequest.RESOURCE_AUDIO_CAPTURE});
+        } else {
+            Log.d(TAG, "RECORD_AUDIO permission denied by user");
+            pendingPermissionRequest.deny();
+        }
+
+        pendingPermissionRequest = null;
+        pendingPermissionResources = null;
     }
 
     @Override
@@ -115,6 +219,11 @@ public class EmbeddedWebView extends CordovaPlugin {
         if ("canGoBack".equals(action)) {
             String id = args.getString(0);
             this.canGoBack(id, callbackContext);
+            return true;
+        }
+        if ("clearHistory".equals(action)) {
+            String id = args.getString(0);
+            this.clearHistory(id, callbackContext);
             return true;
         }
         return false;
@@ -207,6 +316,9 @@ public class EmbeddedWebView extends CordovaPlugin {
             settings.setUseWideViewPort(true);
             settings.setJavaScriptCanOpenWindowsAutomatically(true);
 
+            // Bridge for SPA client-side URL change reporting
+            webView.addJavascriptInterface(new UrlBridge(id), "EWVUrlBridge");
+
             // --- PROGRESS BAR (bottom) ---
             ProgressBar progressBar = new ProgressBar(cordova.getActivity(), null, android.R.attr.progressBarStyleHorizontal);
             String progressColor = options.has("progressColor") ? options.optString("progressColor") : "#007AFF";
@@ -295,6 +407,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                             progressBar.setProgress(10);
                         }
                         injectCookies(view, options, null);
+                        view.evaluateJavascript(URL_TRACK_SCRIPT, null);
                         fireEvent(id, "loadStart", url);
                         updateNavigationState(id);
                     } catch (Exception e) { Log.e(TAG, "onPageStarted error", e); }
@@ -304,6 +417,8 @@ public class EmbeddedWebView extends CordovaPlugin {
                 public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
                     super.doUpdateVisitedHistory(view, url, isReload);
                     updateNavigationState(id);
+                    // Native fallback for SPA client-side navigations (pushState/replaceState/Navigation API).
+                    fireUrlChanged(id, url);
                 }
 
                 @Override
@@ -313,6 +428,7 @@ public class EmbeddedWebView extends CordovaPlugin {
                         else progressBar.setProgress(100);
                         progressBar.postDelayed(() -> progressBar.setVisibility(View.GONE), 200);
                         injectCookies(view, options, null);
+                        view.evaluateJavascript(URL_TRACK_SCRIPT, null);
                         updateNavigationState(id);
                         fireEvent(id, "loadStop", url);
                     } catch (Exception e) { Log.e(TAG, "onPageFinished error", e); }
@@ -407,6 +523,45 @@ public class EmbeddedWebView extends CordovaPlugin {
                         Log.e(TAG, "onCreateWindow: error checking possible URL", e);
                     }
                     return true;
+                }
+
+                @Override
+                public void onPermissionRequest(final android.webkit.PermissionRequest request) {
+                    String[] resources = request.getResources();
+                    boolean requestsAudio = false;
+
+                    if (resources != null) {
+                        for (String resource : resources) {
+                            if (android.webkit.PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)) {
+                                requestsAudio = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!requestsAudio) {
+                        request.deny();
+                        return;
+                    }
+
+                    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M) {
+                        request.grant(resources);
+                        return;
+                    }
+
+                    if (ContextCompat.checkSelfPermission(cordova.getActivity(), Manifest.permission.RECORD_AUDIO)
+                            == PackageManager.PERMISSION_GRANTED) {
+                        request.grant(resources);
+                        return;
+                    }
+
+                    pendingPermissionRequest = request;
+                    pendingPermissionResources = resources;
+                    ActivityCompat.requestPermissions(
+                            cordova.getActivity(),
+                            new String[]{Manifest.permission.RECORD_AUDIO},
+                            PERMISSION_REQUEST_CODE_AUDIO
+                    );
                 }
             });
 
@@ -666,6 +821,36 @@ public class EmbeddedWebView extends CordovaPlugin {
         });
     }
 
+    private void clearHistory(final String id, final CallbackContext callbackContext) {
+    cordova.getActivity().runOnUiThread(() -> {
+
+        WebViewInstance instance = getInstance(id, callbackContext);
+        if (instance == null) return;
+
+        try {
+
+            instance.webView.stopLoading();
+
+            // Clear browser history
+            instance.webView.clearHistory();
+
+            // Reset navigation state
+            instance.canGoBack = false;
+            instance.canGoForward = false;
+            updateNavigationState(id);
+
+            if (callbackContext != null) {
+                callbackContext.success("History cleared");
+            }
+
+        } catch (Exception e) {
+            if (callbackContext != null) {
+                callbackContext.error(e.getMessage());
+            }
+        }
+    });
+    }
+
     private Map<String, String> jsonToMap(JSONObject json) throws JSONException {
         Map<String, String> map = new HashMap<>();
         Iterator<String> keys = json.keys();
@@ -714,6 +899,17 @@ public class EmbeddedWebView extends CordovaPlugin {
         });
     }
     
+    // De-duped emit of urlChanged for SPA client-side navigations.
+    private void fireUrlChanged(String id, String url) {
+        if (url == null || url.isEmpty()) return;
+        WebViewInstance instance = instances.get(id);
+        if (instance == null) return;
+        if (url.equals(instance.lastReportedUrl)) return;
+        instance.lastReportedUrl = url;
+        fireEvent(id, "urlChanged", url);
+        updateNavigationState(id);
+    }
+
     // --- UPDATED FIRE EVENT METHOD (Final Robust Version) ---
     private void fireEvent(String id, String eventName, String data) {
         final String fullEventName = "embeddedwebview." + id + "." + eventName;
